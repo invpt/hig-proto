@@ -1,7 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::{router::Address, value::Value};
 
+#[derive(Clone)]
 pub enum Message {
     Unreachable {
         message: Box<Message>,
@@ -15,11 +16,7 @@ pub enum Message {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TxId {}
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TxMeta {
-    pub affected: Box<[Address]>,
+    pub affected: HashSet<Address>,
 }
-
-// [(t, w), (t1, w1)]
-
-// (d, P)
