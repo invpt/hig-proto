@@ -195,7 +195,11 @@ impl Definition {
 
 impl Actor for Definition {
     fn handle(&mut self, sender: Address, message: Message, ctx: Context) {
-        if self.lock.handle_lock_messages(&sender, &message, &ctx) {
+        if self
+            .lock
+            .handle_lock_messages(&sender, &message, &ctx)
+            .is_none()
+        {
             return;
         }
 

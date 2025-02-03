@@ -30,7 +30,7 @@ pub trait Actor: Send {
     fn handle(&mut self, sender: Address, message: Message, ctx: Context);
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Address {
     index: usize,
 }

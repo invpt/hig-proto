@@ -1,9 +1,14 @@
 use crate::{
-    message::Message,
+    message::{LockKind, Message, TxId},
     router::{Address, Context},
 };
 
 pub struct Lock {}
+
+pub enum LockEvent {
+    Aborted(TxId, LockKind),
+    Released(TxId, LockKind),
+}
 
 impl Lock {
     pub fn new() -> Lock {
@@ -15,9 +20,9 @@ impl Lock {
         sender: &Address,
         message: &Message,
         ctx: &Context,
-    ) -> bool {
+    ) -> Option<LockEvent> {
         _ = (sender, message, ctx);
-        false
+        None
     }
 
     pub fn has_exclusive(&self, who: Address) -> bool {
