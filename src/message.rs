@@ -23,6 +23,16 @@ pub enum Message {
         txid: TxId,
         predecessors: HashSet<TxId>,
     },
+    Preempt {
+        txid: TxId,
+    },
+    Abort {
+        txid: TxId,
+    },
+    Release {
+        txid: TxId,
+        predecessors: HashSet<TxId>,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

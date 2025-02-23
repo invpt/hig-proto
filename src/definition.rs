@@ -1,14 +1,14 @@
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 
 use crate::{
-    lock::Lock,
+    lock::{Lock, LockEvent},
     message::{Message, TxId, TxMeta},
     router::{Actor, Address, Context},
     value::Value,
 };
 
 pub struct Definition {
-    lock: Lock,
+    lock: Lock<(), ()>,
     replicas: HashMap<Address, Option<Value>>,
     ancestor_variable_to_inputs: HashMap<Address, Vec<Address>>,
     subscribers: HashSet<Address>,
@@ -195,13 +195,18 @@ impl Definition {
 
 impl Actor for Definition {
     fn handle(&mut self, sender: Address, message: Message, ctx: Context) {
-        if self
-            .lock
-            .handle_lock_messages(&sender, &message, &ctx)
-            .is_none()
-        {
-            return;
-        }
+        let message = 'unhandled: {
+            match self.lock.handle(message, &ctx, &self.applied_transactions) {
+                LockEvent::Unhandled(message) => break 'unhandled message,
+                LockEvent::Queued { txid, kind } => todo!(),
+                LockEvent::Aborted { txid, data } => todo!(),
+                LockEvent::Released {
+                    txid,
+                    data,
+                    predecessors,
+                } => todo!(),
+            }
+        };
 
         match message {
             Message::Update {
