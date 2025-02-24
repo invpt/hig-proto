@@ -30,13 +30,13 @@ pub enum LockEvent<S, E> {
 
 pub enum LockData<S, E> {
     Shared(S),
-    Exclusive(E),
+    Exclusive(S, E),
 }
 
 enum HeldLocks<S, E> {
     None,
     Shared(BTreeMap<TxId, S>),
-    Exclusive(TxId, E),
+    Exclusive(TxId, S, E),
 }
 
 struct QueuedLock {
@@ -69,7 +69,7 @@ where
                 kind,
                 predecessors,
             } => {
-                let Entry::Vacant(e) = self.queue.entry(txid) else {
+                let Entry::Vacant(e) = self.queue.entry(txid.clone()) else {
                     panic!("lock was double-requested")
                 };
 
@@ -99,15 +99,15 @@ where
                         panic!("abort of unheld lock requested")
                     }
                 }
-                HeldLocks::Exclusive(held_txid, data) => {
+                HeldLocks::Exclusive(held_txid, shared_data, exclusive_data) => {
                     if held_txid == txid {
                         LockEvent::Aborted {
                             txid,
-                            data: LockData::Exclusive(data),
+                            data: LockData::Exclusive(shared_data, exclusive_data),
                         }
                     } else {
                         // restore the unmatched exclusive lock
-                        self.held = HeldLocks::Exclusive(held_txid, data);
+                        self.held = HeldLocks::Exclusive(held_txid, shared_data, exclusive_data);
 
                         panic!("abort of unheld lock requested")
                     }
@@ -134,16 +134,17 @@ where
                             panic!("release of unheld lock requested")
                         }
                     }
-                    HeldLocks::Exclusive(held_txid, data) => {
+                    HeldLocks::Exclusive(held_txid, shared_data, exclusive_data) => {
                         if held_txid == txid {
                             LockEvent::Released {
                                 txid,
-                                data: LockData::Exclusive(data),
+                                data: LockData::Exclusive(shared_data, exclusive_data),
                                 predecessors,
                             }
                         } else {
                             // restore the unmatched exclusive lock
-                            self.held = HeldLocks::Exclusive(held_txid, data);
+                            self.held =
+                                HeldLocks::Exclusive(held_txid, shared_data, exclusive_data);
 
                             panic!("release of unheld lock requested")
                         }
@@ -168,17 +169,17 @@ where
                 // if no locks are held, we can grant this queued lock unconditionally
                 held @ HeldLocks::None => match queued_lock.kind {
                     LockKind::Shared => {
-                        *held = HeldLocks::Shared(BTreeMap::from([(*txid, S::default())]));
+                        *held = HeldLocks::Shared(BTreeMap::from([(txid.clone(), S::default())]));
                     }
                     LockKind::Exclusive => {
-                        *held = HeldLocks::Exclusive(*txid, E::default());
+                        *held = HeldLocks::Exclusive(txid.clone(), S::default(), E::default());
                     }
                 },
 
                 // if shared locks are held, we can grant only shared locks
                 HeldLocks::Shared(held) => match queued_lock.kind {
                     LockKind::Shared => {
-                        held.insert(*txid, S::default());
+                        held.insert(txid.clone(), S::default());
                     }
                     LockKind::Exclusive => {
                         // request preemption of all held shared locks younger than the queued
@@ -188,7 +189,7 @@ where
                                 break;
                             }
 
-                            Self::preempt(*shared_txid, &mut self.preemptions, ctx);
+                            Self::preempt(shared_txid.clone(), &mut self.preemptions, ctx);
                         }
 
                         break;
@@ -196,10 +197,10 @@ where
                 },
 
                 // if an exclusive lock is held, we can grant no locks
-                HeldLocks::Exclusive(held_txid, _) => {
+                HeldLocks::Exclusive(held_txid, _, _) => {
                     // request preemption of the exclusive lock if it is younger than the queued lock
                     if txid < held_txid {
-                        Self::preempt(*held_txid, &mut self.preemptions, ctx);
+                        Self::preempt(held_txid.clone(), &mut self.preemptions, ctx);
                     }
 
                     break;
@@ -207,10 +208,11 @@ where
             }
 
             // if control flow reaches here, the lock has now been granted
+            // TODO: somehow remove it from the queue here!! this is currently broken
             ctx.send(
-                txid.address,
+                txid.address.clone(),
                 Message::LockGranted {
-                    txid: *txid,
+                    txid: txid.clone(),
                     predecessors: completed.clone(),
                 },
             );
@@ -221,16 +223,19 @@ where
     // of self while calling this function
     fn preempt(txid: TxId, preemptions: &mut HashSet<TxId>, ctx: &Context) {
         if !preemptions.contains(&txid) {
-            ctx.send(txid.address, Message::Preempt { txid });
+            ctx.send(
+                txid.address.clone(),
+                Message::Preempt { txid: txid.clone() },
+            );
             preemptions.insert(txid);
         }
     }
 
     pub fn exclusive_lock(&self, txid: &TxId) -> Option<&E> {
         match &self.held {
-            HeldLocks::Exclusive(held_txid, data) => {
+            HeldLocks::Exclusive(held_txid, _, exclusive_data) => {
                 if held_txid == txid {
-                    Some(data)
+                    Some(exclusive_data)
                 } else {
                     None
                 }
@@ -241,9 +246,9 @@ where
 
     pub fn exclusive_lock_mut(&mut self, txid: &TxId) -> Option<&mut E> {
         match &mut self.held {
-            HeldLocks::Exclusive(held_txid, data) => {
+            HeldLocks::Exclusive(held_txid, _, exclusive_data) => {
                 if held_txid == txid {
-                    Some(data)
+                    Some(exclusive_data)
                 } else {
                     None
                 }
@@ -255,6 +260,13 @@ where
     pub fn shared_lock(&self, txid: &TxId) -> Option<&S> {
         match &self.held {
             HeldLocks::Shared(held) => held.get(txid),
+            HeldLocks::Exclusive(held_txid, shared_data, _) => {
+                if held_txid == txid {
+                    Some(shared_data)
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }
@@ -262,6 +274,13 @@ where
     pub fn shared_lock_mut(&mut self, txid: &TxId) -> Option<&mut S> {
         match &mut self.held {
             HeldLocks::Shared(held) => held.get_mut(txid),
+            HeldLocks::Exclusive(held_txid, shared_data, _) => {
+                if held_txid == txid {
+                    Some(shared_data)
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
     }

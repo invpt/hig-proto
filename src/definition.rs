@@ -1,14 +1,14 @@
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 
 use crate::{
-    lock::{Lock, LockEvent},
+    lock::{Lock, LockData, LockEvent},
     message::{Message, TxId, TxMeta},
     router::{Actor, Address, Context},
     value::Value,
 };
 
 pub struct Definition {
-    lock: Lock<(), ()>,
+    lock: Lock<SharedLockState, ()>,
     replicas: HashMap<Address, Option<Value>>,
     ancestor_variable_to_inputs: HashMap<Address, Vec<Address>>,
     subscribers: HashSet<Address>,
@@ -30,7 +30,7 @@ pub struct InputMetadata {
     pub ancestor_variables: Box<[Address]>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct UpdateLink {
     address: Address,
     txid: TxId,
@@ -46,12 +46,12 @@ impl Definition {
         let mut ancestor_variable_to_inputs = HashMap::<Address, Vec<Address>>::new();
         for (input, ancestors) in &inputs {
             for ancestor in &ancestors.ancestor_variables {
-                match ancestor_variable_to_inputs.entry(*ancestor) {
+                match ancestor_variable_to_inputs.entry(ancestor.clone()) {
                     Entry::Occupied(mut e) => {
-                        e.get_mut().push(*input);
+                        e.get_mut().push(input.clone());
                     }
                     Entry::Vacant(e) => {
-                        e.insert(Vec::from([*input]));
+                        e.insert(Vec::from([input.clone()]));
                     }
                 }
             }
@@ -59,7 +59,7 @@ impl Definition {
 
         Definition {
             lock: Lock::new(),
-            replicas: inputs.keys().map(|a| (*a, None)).collect(),
+            replicas: inputs.keys().map(|a| (a.clone(), None)).collect(),
             ancestor_variable_to_inputs,
             subscribers,
             transactions: HashMap::new(),
@@ -74,9 +74,9 @@ impl Definition {
 
         let mut scratch = HashSet::<TxId>::new();
         let mut memo = HashMap::<TxId, bool>::new();
-        for txid in self.transactions.keys().copied() {
+        for txid in self.transactions.keys().cloned() {
             if self.batch_dfs(txid, &mut scratch, &mut memo) {
-                for batch_txid in scratch.iter().copied() {
+                for batch_txid in scratch.iter().cloned() {
                     batch.insert(batch_txid);
                 }
             }
@@ -97,7 +97,7 @@ impl Definition {
             return *result;
         }
 
-        batch.insert(txid);
+        batch.insert(txid.clone());
 
         let tx = &self.transactions[&txid];
 
@@ -108,7 +108,7 @@ impl Definition {
         }
 
         for pred in &tx.predecessors {
-            if !self.batch_dfs(*pred, batch, memo) {
+            if !self.batch_dfs(pred.clone(), batch, memo) {
                 memo.insert(txid, false);
                 return false;
             }
@@ -122,7 +122,7 @@ impl Definition {
     fn apply_batch(&mut self, batch: HashSet<TxId>, ctx: Context) {
         let mut update_ids = batch
             .iter()
-            .copied()
+            .cloned()
             .flat_map(|txid| self.transactions[&txid].updates.values())
             .map(|id| id.expect("incomplete transaction found in batch"))
             .collect::<Vec<ReceivedUpdateId>>();
@@ -147,20 +147,20 @@ impl Definition {
                 return;
             };
 
-            inputs.insert(*address, value.clone());
+            inputs.insert(address.clone(), value.clone());
         }
 
         let message = Message::Update {
             value: Value::Definition {
-                address: ctx.me(),
+                address: ctx.me().clone(),
                 inputs,
             },
             predecessors: batch
                 .iter()
-                .copied()
+                .cloned()
                 .map(|txid| {
                     (
-                        txid,
+                        txid.clone(),
                         TxMeta {
                             affected: self
                                 .transactions
@@ -168,7 +168,7 @@ impl Definition {
                                 .expect("could not locate transaction")
                                 .updates
                                 .keys()
-                                .copied()
+                                .cloned()
                                 .collect(),
                         },
                     )
@@ -177,7 +177,7 @@ impl Definition {
         };
 
         for sub in &self.subscribers {
-            ctx.send(*sub, message.clone());
+            ctx.send(sub.clone(), message.clone());
         }
 
         for txid in batch {
@@ -198,14 +198,25 @@ impl Actor for Definition {
         let message = 'unhandled: {
             match self.lock.handle(message, &ctx, &self.applied_transactions) {
                 LockEvent::Unhandled(message) => break 'unhandled message,
-                LockEvent::Queued { txid, kind } => todo!(),
-                LockEvent::Aborted { txid, data } => todo!(),
-                LockEvent::Released {
-                    txid,
-                    data,
-                    predecessors,
-                } => todo!(),
+                LockEvent::Queued { .. } => (),
+                LockEvent::Aborted { .. } => (),
+                LockEvent::Released { data, .. } => {
+                    let state = match data {
+                        LockData::Shared(state) => state,
+                        LockData::Exclusive(state, _) => state,
+                    };
+
+                    for (subscriber, subscribe) in state.subscription_updates {
+                        if subscribe {
+                            self.subscribers.insert(subscriber);
+                        } else {
+                            self.subscribers.remove(&subscriber);
+                        }
+                    }
+                }
             }
+
+            return;
         };
 
         match message {
@@ -217,26 +228,26 @@ impl Actor for Definition {
                 self.updates.insert(
                     id,
                     ReceivedUpdate {
-                        address: sender,
+                        address: sender.clone(),
                         value,
                     },
                 );
 
                 for (txid, meta) in &predecessors {
-                    match self.transactions.entry(*txid) {
+                    match self.transactions.entry(txid.clone()) {
                         Entry::Vacant(e) => {
                             let affected_inputs = meta
                                 .affected
                                 .iter()
                                 .flat_map(|v| self.ancestor_variable_to_inputs.get(v))
                                 .flat_map(|v| v)
-                                .copied()
+                                .cloned()
                                 .map(|addr| (addr, None));
 
                             let mut updates = HashMap::from_iter(affected_inputs);
-                            updates.insert(sender, Some(id));
+                            updates.insert(sender.clone(), Some(id));
 
-                            let predecessors = HashSet::from_iter(predecessors.keys().copied());
+                            let predecessors = HashSet::from_iter(predecessors.keys().cloned());
 
                             e.insert(PendingTransaction {
                                 updates,
@@ -247,7 +258,7 @@ impl Actor for Definition {
                             let txn = entry.get_mut();
                             if let Some(slot @ None) = txn.updates.get_mut(&sender) {
                                 *slot = Some(id);
-                                for pred in predecessors.keys().copied() {
+                                for pred in predecessors.keys().cloned() {
                                     txn.predecessors.insert(pred);
                                 }
                             }
@@ -258,7 +269,23 @@ impl Actor for Definition {
                 let batch = self.find_batch();
                 self.apply_batch(batch, ctx);
             }
+            Message::SubscriptionUpdate {
+                txid,
+                subscriber,
+                subscribe,
+            } => {
+                let Some(state) = self.lock.shared_lock_mut(&txid) else {
+                    panic!("requested subscription update without shared lock")
+                };
+
+                state.subscription_updates.push((subscriber, subscribe));
+            }
             _ => todo!(),
         }
     }
+}
+
+#[derive(Default)]
+struct SharedLockState {
+    subscription_updates: Vec<(Address, bool)>,
 }

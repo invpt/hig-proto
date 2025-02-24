@@ -30,7 +30,7 @@ pub trait Actor: Send {
     fn handle(&mut self, sender: Address, message: Message, ctx: Context);
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Address {
     index: usize,
 }
@@ -65,7 +65,7 @@ impl Router {
                 queued.message,
                 Context {
                     router: RefCell::new(self),
-                    me: queued.target,
+                    me: queued.target.clone(),
                 },
             );
 
@@ -81,10 +81,10 @@ impl Router {
         };
         self.address_counter += 1;
         let mut actor = Box::new(actor);
-        self.actors.insert(address, None);
+        self.actors.insert(address.clone(), None);
         actor.init(Context {
             router: RefCell::new(self),
-            me: address,
+            me: address.clone(),
         });
         if let Some(entry) = self.actors.get_mut(&address) {
             *entry = Some(actor);
@@ -96,15 +96,15 @@ impl Router {
 
 impl<'a> Context<'a> {
     /// Gets this actor's address.
-    pub fn me(&self) -> Address {
-        self.me
+    pub fn me(&self) -> &Address {
+        &self.me
     }
 
     /// Queues `message` to be sent to and handled by `target`.
     pub fn send(&self, target: Address, message: Message) {
         let message = message.into();
         self.router.borrow_mut().queue.push_back(QueuedMessage {
-            sender: self.me,
+            sender: self.me.clone(),
             target,
             message,
         });

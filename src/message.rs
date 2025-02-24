@@ -33,9 +33,14 @@ pub enum Message {
         txid: TxId,
         predecessors: HashSet<TxId>,
     },
+    SubscriptionUpdate {
+        txid: TxId,
+        subscriber: Address,
+        subscribe: bool,
+    },
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TxId {
     pub kind: TxKind,
     pub timestamp: Timestamp,
