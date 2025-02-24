@@ -163,7 +163,7 @@ where
                     }
                 }
             }
-            _ => return LockEvent::Unhandled(message),
+            _ => LockEvent::Unhandled(message),
         };
 
         self.process_queue(ctx, completed);
