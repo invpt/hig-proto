@@ -76,11 +76,16 @@ impl Router {
     }
 
     pub fn spawn(&mut self, actor: impl Actor + 'static) -> Address {
+        self.spawn_with(|_| actor)
+    }
+
+    pub fn spawn_with<A: Actor + 'static>(&mut self, actor: impl FnOnce(Address) -> A) -> Address {
         let address = Address {
             index: self.address_counter,
         };
         self.address_counter += 1;
-        let mut actor = Box::new(actor);
+
+        let mut actor = Box::new(actor(address.clone()));
         self.actors.insert(address.clone(), None);
         actor.init(Context {
             router: RefCell::new(self),
