@@ -172,6 +172,8 @@ where
     }
 
     fn process_queue(&mut self, ctx: &Context, completed: &HashSet<TxId>) {
+        let mut granted = Vec::new();
+
         for (txid, queued_lock) in self.queue.iter() {
             if !queued_lock.predecessors.is_subset(completed) {
                 continue;
@@ -220,7 +222,11 @@ where
             }
 
             // if control flow reaches here, the lock has now been granted
-            // TODO: somehow remove it from the queue here!! this is currently broken
+            granted.push(txid.clone());
+        }
+
+        for txid in granted {
+            self.queue.remove(&txid);
             ctx.send(
                 txid.address.clone(),
                 Message::LockGranted {
