@@ -28,9 +28,9 @@ pub enum LockEvent<S, E> {
     },
 }
 
-pub enum LockData<S, E> {
-    Shared(S),
-    Exclusive(S, E),
+pub struct LockData<S, E> {
+    pub shared: S,
+    pub exclusive: Option<E>,
 }
 
 enum HeldLocks<S, E> {
@@ -93,7 +93,10 @@ where
                     if let Some(data) = data {
                         LockEvent::Aborted {
                             txid,
-                            data: LockData::Shared(data),
+                            data: LockData {
+                                shared: data,
+                                exclusive: None,
+                            },
                         }
                     } else {
                         panic!("abort of unheld lock requested")
@@ -103,7 +106,10 @@ where
                     if held_txid == txid {
                         LockEvent::Aborted {
                             txid,
-                            data: LockData::Exclusive(shared_data, exclusive_data),
+                            data: LockData {
+                                shared: shared_data,
+                                exclusive: Some(exclusive_data),
+                            },
                         }
                     } else {
                         // restore the unmatched exclusive lock
@@ -127,7 +133,10 @@ where
                         if let Some(data) = data {
                             LockEvent::Released {
                                 txid,
-                                data: LockData::Shared(data),
+                                data: LockData {
+                                    shared: data,
+                                    exclusive: None,
+                                },
                                 predecessors,
                             }
                         } else {
@@ -138,7 +147,10 @@ where
                         if held_txid == txid {
                             LockEvent::Released {
                                 txid,
-                                data: LockData::Exclusive(shared_data, exclusive_data),
+                                data: LockData {
+                                    shared: shared_data,
+                                    exclusive: Some(exclusive_data),
+                                },
                                 predecessors,
                             }
                         } else {

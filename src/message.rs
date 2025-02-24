@@ -23,6 +23,14 @@ pub enum Message {
         txid: TxId,
         predecessors: HashSet<TxId>,
     },
+    SubscriptionUpdate {
+        txid: TxId,
+        subscriber: Address,
+        subscribe: bool,
+    },
+    Retire {
+        txid: TxId,
+    },
     Preempt {
         txid: TxId,
     },
@@ -32,11 +40,6 @@ pub enum Message {
     Release {
         txid: TxId,
         predecessors: HashSet<TxId>,
-    },
-    SubscriptionUpdate {
-        txid: TxId,
-        subscriber: Address,
-        subscribe: bool,
     },
 }
 

@@ -1,4 +1,7 @@
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::{
+    collections::{hash_map::Entry, HashMap, HashSet},
+    default,
+};
 
 use crate::{
     lock::{Lock, LockData, LockEvent},
@@ -8,7 +11,7 @@ use crate::{
 };
 
 pub struct Definition {
-    lock: Lock<SharedLockState, ()>,
+    lock: Lock<SharedLockState, ExclusiveLockState>,
     replicas: HashMap<Address, Option<Value>>,
     ancestor_variable_to_inputs: HashMap<Address, Vec<Address>>,
     subscribers: HashSet<Address>,
@@ -201,16 +204,20 @@ impl Actor for Definition {
                 LockEvent::Queued { .. } => (),
                 LockEvent::Aborted { .. } => (),
                 LockEvent::Released { data, .. } => {
-                    let state = match data {
-                        LockData::Shared(state) => state,
-                        LockData::Exclusive(state, _) => state,
-                    };
-
-                    for (subscriber, subscribe) in state.subscription_updates {
+                    for (subscriber, subscribe) in data.shared.subscription_updates {
                         if subscribe {
                             self.subscribers.insert(subscriber);
                         } else {
                             self.subscribers.remove(&subscriber);
+                        }
+                    }
+
+                    if let Some(exclusive_data) = data.exclusive {
+                        match exclusive_data {
+                            ExclusiveLockState::Empty => (),
+                            ExclusiveLockState::Retire => {
+                                ctx.retire();
+                            }
                         }
                     }
                 }
@@ -269,6 +276,13 @@ impl Actor for Definition {
                 let batch = self.find_batch();
                 self.apply_batch(batch, ctx);
             }
+            Message::Retire { txid } => {
+                let Some(state) = self.lock.exclusive_lock_mut(&txid) else {
+                    panic!("requested retirement without exclusive lock")
+                };
+
+                *state = ExclusiveLockState::Retire;
+            }
             Message::SubscriptionUpdate {
                 txid,
                 subscriber,
@@ -288,4 +302,11 @@ impl Actor for Definition {
 #[derive(Default)]
 struct SharedLockState {
     subscription_updates: Vec<(Address, bool)>,
+}
+
+#[derive(Default)]
+enum ExclusiveLockState {
+    #[default]
+    Empty,
+    Retire,
 }
