@@ -1,5 +1,5 @@
 mod definition;
-mod lock;
+mod helpers;
 mod manager;
 mod message;
 mod router;

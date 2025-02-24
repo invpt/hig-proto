@@ -1,7 +1,7 @@
-use std::collections::{btree_map::Entry, BTreeMap, HashSet};
+use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet};
 
 use crate::{
-    message::{LockKind, Message, TxId},
+    message::{LockKind, Message, TxId, TxMeta},
     router::{Address, Context},
 };
 
@@ -24,7 +24,7 @@ pub enum LockEvent<S, E> {
     Released {
         txid: TxId,
         data: LockData<S, E>,
-        predecessors: HashSet<TxId>,
+        predecessors: HashMap<TxId, TxMeta>,
     },
 }
 
@@ -61,6 +61,9 @@ where
         &mut self,
         message: Message,
         ctx: &Context,
+        // TODO: create a trait for this rather than using HashSet directly, b/c sometimes we want
+        // to provide a HashMap with TxId keys instead of just a HashSet, and there's no built-in
+        // subtyping for these types so it currently requires collecting all the keys into a set.
         completed: &HashSet<TxId>,
     ) -> LockEvent<S, E> {
         let event = match message {

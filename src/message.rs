@@ -28,6 +28,18 @@ pub enum Message {
         subscriber: Address,
         subscribe: bool,
     },
+    Read {
+        txid: TxId,
+    },
+    Value {
+        txid: TxId,
+        value: Value,
+        predecessors: HashMap<TxId, TxMeta>,
+    },
+    Write {
+        txid: TxId,
+        value: Value,
+    },
     Retire {
         txid: TxId,
     },
@@ -39,7 +51,7 @@ pub enum Message {
     },
     Release {
         txid: TxId,
-        predecessors: HashSet<TxId>,
+        predecessors: HashMap<TxId, TxMeta>,
     },
 }
 

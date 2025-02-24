@@ -1,10 +1,7 @@
-use std::{
-    collections::{hash_map::Entry, HashMap, HashSet},
-    default,
-};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 
 use crate::{
-    lock::{Lock, LockData, LockEvent},
+    helpers::lock::{Lock, LockEvent},
     message::{Message, TxId, TxMeta},
     router::{Actor, Address, Context},
     value::Value,
@@ -214,7 +211,7 @@ impl Actor for Definition {
 
                     if let Some(exclusive_data) = data.exclusive {
                         match exclusive_data {
-                            ExclusiveLockState::Empty => (),
+                            ExclusiveLockState::Normal => (),
                             ExclusiveLockState::Retire => {
                                 ctx.retire();
                             }
@@ -276,13 +273,6 @@ impl Actor for Definition {
                 let batch = self.find_batch();
                 self.apply_batch(batch, ctx);
             }
-            Message::Retire { txid } => {
-                let Some(state) = self.lock.exclusive_lock_mut(&txid) else {
-                    panic!("requested retirement without exclusive lock")
-                };
-
-                *state = ExclusiveLockState::Retire;
-            }
             Message::SubscriptionUpdate {
                 txid,
                 subscriber,
@@ -293,6 +283,13 @@ impl Actor for Definition {
                 };
 
                 state.subscription_updates.push((subscriber, subscribe));
+            }
+            Message::Retire { txid } => {
+                let Some(state) = self.lock.exclusive_lock_mut(&txid) else {
+                    panic!("requested retirement without exclusive lock")
+                };
+
+                *state = ExclusiveLockState::Retire;
             }
             _ => todo!(),
         }
@@ -307,6 +304,6 @@ struct SharedLockState {
 #[derive(Default)]
 enum ExclusiveLockState {
     #[default]
-    Empty,
+    Normal,
     Retire,
 }
