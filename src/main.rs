@@ -1,8 +1,10 @@
 mod definition;
+mod expr;
 mod helpers;
+mod manager;
 mod message;
 mod router;
-mod transactor;
+mod transaction;
 mod value;
 mod variable;
 
