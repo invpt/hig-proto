@@ -3,7 +3,11 @@ use std::{
     time::{Instant, UNIX_EPOCH},
 };
 
-use crate::{router::Address, value::Value};
+use crate::{
+    actor::Address,
+    expr::{Action, Upgrade},
+    value::Value,
+};
 
 #[derive(Clone)]
 pub enum Message {
@@ -52,6 +56,14 @@ pub enum Message {
     Release {
         txid: TxId,
         predecessors: HashMap<TxId, TxMeta>,
+    },
+
+    // manager-only
+    Do {
+        action: Action,
+    },
+    Upgrade {
+        upgrade: Upgrade,
     },
 }
 

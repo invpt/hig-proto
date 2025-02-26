@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    helpers::lock::{Lock, LockEvent},
+    actor::{Actor, Address, Context},
+    lock::{Lock, LockEvent},
     message::{Message, TxId, TxMeta},
-    router::{Actor, Address, Context},
     value::Value,
 };
 

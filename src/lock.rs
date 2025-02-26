@@ -1,8 +1,8 @@
 use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet};
 
 use crate::{
+    actor::Context,
     message::{LockKind, Message, TxId, TxMeta},
-    router::{Address, Context},
 };
 
 pub struct Lock<S, E> {

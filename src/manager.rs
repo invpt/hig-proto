@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use crate::{
+    actor::{Actor, Address, Context},
+    expr::Action,
     message::{LockKind, Message, TxId},
-    router::{Actor, Address, Context},
-    transaction::Transaction,
     value::Value,
 };
 
@@ -12,7 +12,7 @@ pub struct Manager {
 }
 
 struct ActiveTransaction {
-    transaction: Transaction,
+    action: Action,
     locks: HashMap<Address, LockKind>,
     state: State,
 }

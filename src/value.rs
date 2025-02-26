@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::router::Address;
+use crate::actor::Address;
 
 #[derive(Debug, Clone)]
 pub enum Value {
