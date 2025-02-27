@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::{
     actor::{Actor, Address, Context},
-    expr::Action,
+    expr::{Action, Expr},
     message::{LockKind, Message, TxId},
     value::Value,
 };
@@ -36,5 +36,10 @@ impl Manager {
 }
 
 impl Actor for Manager {
-    fn handle(&mut self, sender: Address, message: Message, ctx: Context) {}
+    fn handle(&mut self, sender: Address, message: Message, ctx: Context) {
+        match message {
+            Message::Do { action } => {}
+            _ => todo!(),
+        }
+    }
 }
