@@ -206,7 +206,7 @@ where
                                 break;
                             }
 
-                            Self::preempt(shared_txid.clone(), &mut self.preemptions, ctx);
+                            Self::preempt(shared_txid, &mut self.preemptions, ctx);
                         }
 
                         break;
@@ -217,7 +217,7 @@ where
                 HeldLocks::Exclusive(held_txid, _, _) => {
                     // request preemption of the exclusive lock if it is younger than the queued lock
                     if txid < held_txid {
-                        Self::preempt(held_txid.clone(), &mut self.preemptions, ctx);
+                        Self::preempt(held_txid, &mut self.preemptions, ctx);
                     }
 
                     break;
@@ -242,13 +242,13 @@ where
 
     // cannot take &mut self, must take ref to preemptions, because we might need to ref other parts
     // of self while calling this function
-    fn preempt(txid: TxId, preemptions: &mut HashSet<TxId>, ctx: &Context) {
-        if !preemptions.contains(&txid) {
+    fn preempt(txid: &TxId, preemptions: &mut HashSet<TxId>, ctx: &Context) {
+        if !preemptions.contains(txid) {
             ctx.send(
                 txid.address.clone(),
                 Message::Preempt { txid: txid.clone() },
             );
-            preemptions.insert(txid);
+            preemptions.insert(txid.clone());
         }
     }
 
