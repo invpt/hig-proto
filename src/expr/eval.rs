@@ -5,11 +5,17 @@ use crate::value::Value;
 use super::{Action, Expr};
 
 pub trait ExprEvalContext<Ident> {
-    fn read(&mut self, address: &Ident) -> Option<Value>;
+    /// Reads the value held by the node referenced by `ident`.
+    ///
+    /// If the value is not yet ready, this function may return `None` instead of a value.
+    fn read(&mut self, ident: &Ident) -> Option<Value>;
 }
 
 pub trait ActionEvalContext<Ident>: ExprEvalContext<Ident> {
-    fn write(&mut self, ident: &Ident, value: Value);
+    /// Writes to the node referenced by `ident` with the given `value`.
+    ///
+    /// If the value is not yet ready, this function may be called with `None` instead of a value.
+    fn write(&mut self, ident: &Ident, value: Option<Value>);
 }
 
 impl<Ident> Expr<Ident> {
@@ -43,7 +49,7 @@ impl<Ident> Action<Ident> {
                     (_, _) => (),
                 }
             }
-            Action::Write(_, expr) => {
+            Action::Write(address, expr) => {
                 expr.eval(ctx);
 
                 if let Expr::Value(_) = expr {
@@ -54,7 +60,9 @@ impl<Ident> Action<Ident> {
                         unreachable!()
                     };
 
-                    ctx.write(&address, value);
+                    ctx.write(&address, Some(value));
+                } else {
+                    ctx.write(address, None);
                 }
             }
             Action::Nil => (),

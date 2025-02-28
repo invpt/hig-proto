@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
-    time::{Instant, UNIX_EPOCH},
+    sync::atomic::AtomicU64,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
@@ -82,7 +83,38 @@ pub enum TxKind {
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timestamp {
-    epoch_micros: u128,
+    epoch_micros: u64,
+}
+
+pub struct MonotonicTimestampGenerator {
+    latest: Timestamp,
+}
+
+impl MonotonicTimestampGenerator {
+    pub fn new() -> MonotonicTimestampGenerator {
+        MonotonicTimestampGenerator {
+            latest: Timestamp { epoch_micros: 0 },
+        }
+    }
+
+    pub fn generate_timestamp(&mut self) -> Timestamp {
+        #[cfg(not(target_arch = "wasm32"))]
+        let epoch_micros = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_micros() as u64;
+
+        #[cfg(target_arch = "wasm32")]
+        compile_error!("Wasm support has not yet been implemented.");
+
+        if epoch_micros > self.latest.epoch_micros {
+            self.latest = Timestamp { epoch_micros };
+        } else {
+            self.latest.epoch_micros += 1;
+        }
+
+        self.latest
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]

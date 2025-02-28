@@ -1,6 +1,6 @@
 use crate::{actor::Address, value::Value};
 
-mod eval;
+pub mod eval;
 
 #[derive(Clone)]
 pub struct Name {
