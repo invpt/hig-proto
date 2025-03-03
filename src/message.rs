@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::atomic::AtomicU64,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::SystemTime,
 };
 
 use crate::{
@@ -12,22 +11,32 @@ use crate::{
 
 #[derive(Clone)]
 pub enum Message {
+    // messages sent by the system itself
     Unreachable {
         message: Box<Message>,
     },
+
+    // propagation
     Update {
         value: Value,
         predecessors: HashMap<TxId, TxMeta>,
     },
+
+    // mutation - initial lock request
     Lock {
         txid: TxId,
         kind: LockKind,
         predecessors: HashSet<TxId>,
     },
+    LockRejected {
+        needs_predecessors_from_inputs: HashSet<Address>,
+    },
     LockGranted {
         txid: TxId,
         predecessors: HashSet<TxId>,
     },
+
+    // mutation - messages available to shared and exclusive locks
     SubscriptionUpdate {
         txid: TxId,
         subscriber: Address,
@@ -41,6 +50,8 @@ pub enum Message {
         value: Value,
         predecessors: HashMap<TxId, TxMeta>,
     },
+
+    // mutation - messages available to exclusive locks
     Write {
         txid: TxId,
         value: Value,
@@ -48,6 +59,8 @@ pub enum Message {
     Retire {
         txid: TxId,
     },
+
+    // mutation - messages related to ending the lock
     Preempt {
         txid: TxId,
     },
@@ -59,7 +72,7 @@ pub enum Message {
         predecessors: HashMap<TxId, TxMeta>,
     },
 
-    // manager-only
+    // messages handled by managers only
     Do {
         action: Action,
     },

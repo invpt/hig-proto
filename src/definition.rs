@@ -196,9 +196,15 @@ impl Definition {
 impl Actor for Definition {
     fn handle(&mut self, sender: Address, message: Message, ctx: Context) {
         let message = 'unhandled: {
-            match self.lock.handle(message, &ctx, &self.applied_transactions) {
+            match self.lock.handle(
+                message,
+                &ctx,
+                &self.ancestor_variable_to_inputs.keys().cloned().collect(),
+                &self.applied_transactions,
+            ) {
                 LockEvent::Unhandled(message) => break 'unhandled message,
                 LockEvent::Queued { .. } => (),
+                LockEvent::Rejected { .. } => (),
                 LockEvent::Aborted { .. } => (),
                 LockEvent::Released { data, .. } => {
                     for (subscriber, subscribe) in data.shared.subscription_updates {

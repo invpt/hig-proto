@@ -1,7 +1,7 @@
 use std::collections::{btree_map::Entry, BTreeMap, HashMap, HashSet};
 
 use crate::{
-    actor::Context,
+    actor::{Address, Context},
     message::{LockKind, Message, TxId, TxMeta},
 };
 
@@ -14,6 +14,10 @@ pub struct Lock<S, E> {
 pub enum LockEvent<S, E> {
     Unhandled(Message),
     Queued {
+        txid: TxId,
+        kind: LockKind,
+    },
+    Rejected {
         txid: TxId,
         kind: LockKind,
     },
@@ -61,6 +65,7 @@ where
         &mut self,
         message: Message,
         ctx: &Context,
+        inputs: &HashSet<Address>,
         // TODO: create a trait for this rather than using HashSet directly, b/c sometimes we want
         // to provide a HashMap with TxId keys instead of just a HashSet, and there's no built-in
         // subtyping for these types so it currently requires collecting all the keys into a set.
@@ -76,10 +81,18 @@ where
                     panic!("lock was double-requested")
                 };
 
-                e.insert(QueuedLock {
-                    kind,
-                    predecessors: predecessors.clone(),
-                });
+                if predecessors.is_empty() && !inputs.is_empty() {
+                    ctx.send(
+                        txid.address.clone(),
+                        Message::LockRejected {
+                            needs_predecessors_from_inputs: inputs.clone(),
+                        },
+                    );
+
+                    return LockEvent::Rejected { txid, kind };
+                }
+
+                e.insert(QueuedLock { kind, predecessors });
 
                 LockEvent::Queued { txid, kind }
             }

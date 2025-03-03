@@ -20,11 +20,13 @@ impl Actor for Variable {
             match self.lock.handle(
                 message,
                 &ctx,
+                &HashSet::new(),
                 // TODO: make this more efficient
                 &self.applied_transactions.keys().cloned().collect(),
             ) {
                 LockEvent::Unhandled(message) => break 'unhandled message,
                 LockEvent::Queued { .. } => (),
+                LockEvent::Rejected { .. } => (),
                 LockEvent::Aborted { .. } => (),
                 LockEvent::Released {
                     data, predecessors, ..
