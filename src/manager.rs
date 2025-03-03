@@ -29,8 +29,14 @@ struct Transaction {
 
 struct Lock {
     kind: LockKind,
-    value: Option<Value>,
+    replica: Option<Value>,
     state: LockState,
+}
+
+enum ReplicaState {
+    Unneeded,
+    Requestable,
+    Requested,
 }
 
 enum LockState {
@@ -128,7 +134,7 @@ impl Transaction {
             address.clone(),
             Lock {
                 kind,
-                value: None,
+                replica: None,
                 state: if all_held {
                     LockState::Requested
                 } else {
@@ -151,17 +157,17 @@ impl<'a, 'c> ExprEvalContext<Address> for ActionContext<'a, 'c> {
     fn read(&mut self, address: &Address) -> Option<Value> {
         self.tx
             .lock(address, LockKind::Shared, &self.mgr, &self.ctx)
-            .value
+            .replica
             .clone()
     }
 }
 
 impl<'a, 'c> ActionEvalContext<Address> for ActionContext<'a, 'c> {
-    fn write(&mut self, address: &Address, value: Option<Value>) {
-        if let Some(value) = value {
-            todo!();
-        } else {
-            self.tx.will_write.insert(address.clone());
-        }
+    fn write(&mut self, address: &Address, value: Value) {
+        todo!();
+    }
+
+    fn will_write(&mut self, address: &Address) {
+        self.tx.will_write.insert(address.clone());
     }
 }

@@ -9,13 +9,35 @@ pub trait ExprEvalContext<Ident> {
     ///
     /// If the value is not yet ready, this function may return `None` instead of a value.
     fn read(&mut self, ident: &Ident) -> Option<Value>;
+
+    /// Indicates that the node referenced by `ident` is guaranteed to be read with a future call
+    /// to `read`.
+    fn will_read(&mut self, ident: &Ident) {
+        _ = ident;
+    }
+
+    /// Indicates that the node referenced by `ident` may potentially be read with a future call
+    /// to `read`.
+    fn may_read(&mut self, ident: &Ident) {
+        _ = ident;
+    }
 }
 
 pub trait ActionEvalContext<Ident>: ExprEvalContext<Ident> {
     /// Writes to the node referenced by `ident` with the given `value`.
-    ///
-    /// If the value is not yet ready, this function may be called with `None` instead of a value.
-    fn write(&mut self, ident: &Ident, value: Option<Value>);
+    fn write(&mut self, ident: &Ident, value: Value);
+
+    /// Indicates that the node referenced by `ident` is guaranteed to be written to by a future
+    /// call to `write`.
+    fn will_write(&mut self, ident: &Ident) {
+        _ = ident;
+    }
+
+    /// Indicates that the node referenced by `ident` may potentially be written to by a future
+    /// call to `write`.
+    fn may_write(&mut self, ident: &Ident) {
+        _ = ident;
+    }
 }
 
 impl<Ident> Expr<Ident> {
@@ -38,6 +60,10 @@ impl<Ident> Action<Ident> {
     ///
     /// When `self` is [`Action::Nil`], no further evaulation will be done.
     pub fn eval(&mut self, ctx: &mut impl ActionEvalContext<Ident>) {
+        // TODO: update this function so that it calls the (will|may)_(read|write) methods at the
+        // right times -- for instance, currently this function could do writes out of ourder, which
+        // is especially a problem when the same variable is written multiple times in one txn.
+
         match self {
             Action::Seq(a, b) => {
                 a.eval(ctx);
@@ -60,9 +86,9 @@ impl<Ident> Action<Ident> {
                         unreachable!()
                     };
 
-                    ctx.write(&address, Some(value));
+                    ctx.write(&address, value);
                 } else {
-                    ctx.write(address, None);
+                    ctx.will_write(address);
                 }
             }
             Action::Nil => (),
