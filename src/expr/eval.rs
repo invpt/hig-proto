@@ -80,7 +80,14 @@ impl<Ident> Action<Ident> {
         match self {
             Action::Seq(a, b) => {
                 a.eval_inner(tense, ctx);
-                b.eval_inner(tense.weaken(EvalTense::Future), ctx);
+
+                let tense = if let Action::Nil = &**a {
+                    tense.weaken(EvalTense::Future)
+                } else {
+                    tense
+                };
+
+                b.eval_inner(tense, ctx);
 
                 match (&mut **a, &mut **b) {
                     (Action::Nil, b) => *self = mem::replace(b, Action::Nil),
@@ -89,7 +96,7 @@ impl<Ident> Action<Ident> {
                 }
             }
             Action::Write(address, expr) => {
-                expr.eval(ctx);
+                expr.eval_inner(tense, ctx);
 
                 match tense {
                     EvalTense::Present => {
