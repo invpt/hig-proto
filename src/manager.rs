@@ -28,8 +28,9 @@ struct Transaction {
 }
 
 struct Lock {
+    address: Address,
     kind: LockKind,
-    replica: Option<Value>,
+    value: Option<Value>,
     request: Option<RequestState>,
     state: LockState,
 }
@@ -121,6 +122,8 @@ impl Actor for Manager {
                 assert!(matches!(lock.state, LockState::Requested));
 
                 lock.state = LockState::Held(predecessors);
+
+                lock.send_request(&txid, &ctx);
             }
             _ => todo!(),
         }
@@ -191,8 +194,9 @@ impl Transaction {
             self.locks.insert(
                 address.clone(),
                 Lock {
+                    address: address.clone(),
                     kind,
-                    replica: None,
+                    value: None,
                     request: None,
                     state: if all_held {
                         LockState::Requested
@@ -220,7 +224,7 @@ impl Transaction {
                         "When a write is requested, the lock kind must be Exclusive"
                     );
 
-                    lock.replica = Some(value);
+                    lock.value = Some(value);
                     lock.request = Some(RequestState {
                         sent: false,
                         kind: RequestKind::Write,
@@ -231,6 +235,44 @@ impl Transaction {
         };
 
         &self.locks[address]
+    }
+}
+
+impl Lock {
+    pub fn send_request(&mut self, txid: &TxId, ctx: &Context) {
+        assert!(
+            matches!(self.state, LockState::Held(_)),
+            "lock must be held to send its request"
+        );
+
+        let Some(request) = &mut self.request else {
+            return;
+        };
+
+        if request.sent {
+            return;
+        }
+
+        match request.kind {
+            RequestKind::Read => {
+                ctx.send(self.address.clone(), Message::Read { txid: txid.clone() });
+            }
+            RequestKind::Write => {
+                let Some(value) = self.value.clone() else {
+                    panic!("write request without value to write")
+                };
+
+                ctx.send(
+                    self.address.clone(),
+                    Message::Write {
+                        txid: txid.clone(),
+                        value,
+                    },
+                )
+            }
+        }
+
+        request.sent = true;
     }
 }
 
@@ -250,7 +292,7 @@ impl<'a, 'c> ExprEvalContext<Address> for ActionContext<'a, 'c> {
                 &self.mgr,
                 self.ctx,
             )
-            .replica
+            .value
             .clone()
     }
 }
