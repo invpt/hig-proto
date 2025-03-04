@@ -29,6 +29,7 @@ pub enum Message {
         predecessors: HashSet<TxId>,
     },
     LockRejected {
+        txid: TxId,
         needs_predecessors_from_inputs: HashSet<Address>,
     },
     LockGranted {
@@ -135,7 +136,7 @@ pub struct TxMeta {
     pub affected: HashSet<Address>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LockKind {
     Shared,
     Exclusive,

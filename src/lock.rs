@@ -85,6 +85,7 @@ where
                     ctx.send(
                         txid.address.clone(),
                         Message::LockRejected {
+                            txid: txid.clone(),
                             needs_predecessors_from_inputs: inputs.clone(),
                         },
                     );

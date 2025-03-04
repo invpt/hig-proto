@@ -30,19 +30,29 @@ struct Transaction {
 struct Lock {
     kind: LockKind,
     replica: Option<Value>,
+    request: Option<RequestState>,
     state: LockState,
 }
 
-enum ReplicaState {
-    Unneeded,
-    Requestable,
-    Requested,
+struct RequestState {
+    sent: bool,
+    kind: RequestKind,
+}
+
+enum RequestKind {
+    Read,
+    Write,
+}
+
+enum Request {
+    Read,
+    Write(Value),
 }
 
 enum LockState {
     Pending,
     Requested,
-    Held(TxId),
+    Held(HashSet<TxId>),
 }
 
 impl Manager {
@@ -79,9 +89,39 @@ impl Manager {
 }
 
 impl Actor for Manager {
-    fn handle(&mut self, _sender: Address, message: Message, ctx: Context) {
+    fn handle(&mut self, sender: Address, message: Message, ctx: Context) {
         match message {
             Message::Do { action } => self.do_action(action, &ctx),
+            Message::LockRejected {
+                txid,
+                needs_predecessors_from_inputs,
+            } => {
+                self.node_inputs
+                    .insert(sender.clone(), needs_predecessors_from_inputs);
+
+                let tx = self.transactions.get_mut(&txid).unwrap().as_mut().unwrap();
+
+                let lock = tx
+                    .locks
+                    .get_mut(&sender)
+                    .expect("received lock granted from unknown lock");
+
+                assert!(matches!(lock.state, LockState::Requested));
+
+                lock.state = LockState::Pending;
+            }
+            Message::LockGranted { txid, predecessors } => {
+                let tx = self.transactions.get_mut(&txid).unwrap().as_mut().unwrap();
+
+                let lock = tx
+                    .locks
+                    .get_mut(&sender)
+                    .expect("received lock granted from unknown lock");
+
+                assert!(matches!(lock.state, LockState::Requested));
+
+                lock.state = LockState::Held(predecessors);
+            }
             _ => todo!(),
         }
 
@@ -96,52 +136,99 @@ impl Transaction {
         self.action = action;
     }
 
-    fn lock(&mut self, address: &Address, kind: LockKind, mgr: &Manager, ctx: &Context) -> &Lock {
-        // Early return if the lock has already been requested
-        // TODO: ensure the already-requested lock has compatible kind
-        if self.locks.contains_key(address) {
-            return &self.locks[address];
-        }
+    fn lock(
+        &mut self,
+        address: &Address,
+        kind: LockKind,
+        request: Option<Request>,
+        mgr: &Manager,
+        ctx: &Context,
+    ) -> &Lock {
+        let lock = if self.locks.contains_key(address) {
+            let lock = self.locks.get_mut(address).unwrap();
 
-        let mut predecessors = HashSet::new();
-        let mut all_held = true;
-        for input in mgr
-            .node_inputs
-            .get(address)
-            .iter()
-            .flat_map(|inputs| inputs.iter())
-        {
-            if let LockState::Held(txid) = &self.lock(input, kind, mgr, ctx).state {
-                predecessors.insert(txid.clone());
-            } else {
-                all_held = false;
-                break;
+            if lock.kind != kind {
+                // TODO: is it possible to implement the rest of manager so that locks never need
+                // to be upgrade? There is a degenerate way of doing this, always requesting
+                // exclusive locks, but that's an especially inefficient way. Also have to consider
+                // code updates not just actions.
+                todo!("upgrading the kind of locks")
             }
-        }
 
-        if all_held {
-            ctx.send(
+            lock
+        } else {
+            let mut predecessors = HashSet::new();
+            let mut all_held = true;
+            for input in mgr
+                .node_inputs
+                .get(address)
+                .iter()
+                .flat_map(|inputs| inputs.iter())
+            {
+                if let LockState::Held(node_predecessors) =
+                    &self.lock(input, kind, None, mgr, ctx).state
+                {
+                    for pred in node_predecessors {
+                        predecessors.insert(pred.clone());
+                    }
+                } else {
+                    all_held = false;
+                    break;
+                }
+            }
+
+            if all_held {
+                ctx.send(
+                    address.clone(),
+                    Message::Lock {
+                        txid: self.id.clone(),
+                        kind,
+                        predecessors,
+                    },
+                );
+            }
+
+            self.locks.insert(
                 address.clone(),
-                Message::Lock {
-                    txid: self.id.clone(),
+                Lock {
                     kind,
-                    predecessors,
+                    replica: None,
+                    request: None,
+                    state: if all_held {
+                        LockState::Requested
+                    } else {
+                        LockState::Pending
+                    },
                 },
             );
-        }
 
-        self.locks.insert(
-            address.clone(),
-            Lock {
-                kind,
-                replica: None,
-                state: if all_held {
-                    LockState::Requested
-                } else {
-                    LockState::Pending
-                },
+            self.locks.get_mut(address).unwrap()
+        };
+
+        match request {
+            Some(request) => match request {
+                Request::Read => {
+                    lock.request = Some(RequestState {
+                        sent: false,
+                        kind: RequestKind::Read,
+                    });
+                }
+                Request::Write(value) => {
+                    assert_eq!(
+                        kind,
+                        LockKind::Exclusive,
+                        "When a write is requested, the lock kind must be Exclusive"
+                    );
+
+                    lock.replica = Some(value);
+                    lock.request = Some(RequestState {
+                        sent: false,
+                        kind: RequestKind::Write,
+                    });
+                }
             },
-        );
+            None => (),
+        };
 
         &self.locks[address]
     }
@@ -156,7 +243,13 @@ struct ActionContext<'a, 'c> {
 impl<'a, 'c> ExprEvalContext<Address> for ActionContext<'a, 'c> {
     fn read(&mut self, address: &Address) -> Option<Value> {
         self.tx
-            .lock(address, LockKind::Shared, &self.mgr, &self.ctx)
+            .lock(
+                address,
+                LockKind::Shared,
+                Some(Request::Read),
+                &self.mgr,
+                self.ctx,
+            )
             .replica
             .clone()
     }
@@ -164,10 +257,17 @@ impl<'a, 'c> ExprEvalContext<Address> for ActionContext<'a, 'c> {
 
 impl<'a, 'c> ActionEvalContext<Address> for ActionContext<'a, 'c> {
     fn write(&mut self, address: &Address, value: Value) {
-        todo!();
+        self.tx.lock(
+            address,
+            LockKind::Exclusive,
+            Some(Request::Write(value)),
+            &self.mgr,
+            self.ctx,
+        );
     }
 
     fn will_write(&mut self, address: &Address) {
-        self.tx.will_write.insert(address.clone());
+        self.tx
+            .lock(address, LockKind::Exclusive, None, &self.mgr, self.ctx);
     }
 }
