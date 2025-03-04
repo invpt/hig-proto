@@ -12,6 +12,11 @@ pub trait ExprEvalContext<Ident> {
 
     /// Indicates that the node referenced by `ident` is guaranteed to be read with a future call
     /// to `read`.
+    ///
+    /// An important distinction of this method compared to `read` is that reads indicated by
+    /// calling this method may occur following a conflicting read. So, while `read` indicates that
+    /// the *currently held* value of an `ident` needs to be read, `will_read` indicates that some
+    /// *future* value of an `ident` will need to be read.
     fn will_read(&mut self, ident: &Ident) {
         _ = ident;
     }
@@ -45,10 +50,18 @@ impl<Ident> Expr<Ident> {
     ///
     /// When `self` is an [`Expr::Value`], no further evaulation will be done.
     pub fn eval(&mut self, ctx: &mut impl ExprEvalContext<Ident>) {
+        self.eval_inner(EvalTense::Present, ctx);
+    }
+
+    fn eval_inner(&mut self, tense: EvalTense, ctx: &mut impl ExprEvalContext<Ident>) {
         match self {
-            Expr::Read(address) => match ctx.read(address) {
-                Some(value) => *self = Expr::Value(value),
-                None => (),
+            Expr::Read(address) => match tense {
+                EvalTense::Present => match ctx.read(address) {
+                    Some(value) => *self = Expr::Value(value),
+                    None => (),
+                },
+                EvalTense::Future => ctx.will_read(address),
+                EvalTense::Conditional => ctx.may_read(address),
             },
             Expr::Value(_) => (),
         }
@@ -60,14 +73,14 @@ impl<Ident> Action<Ident> {
     ///
     /// When `self` is [`Action::Nil`], no further evaulation will be done.
     pub fn eval(&mut self, ctx: &mut impl ActionEvalContext<Ident>) {
-        // TODO: update this function so that it calls the (will|may)_(read|write) methods at the
-        // right times -- for instance, currently this function could do writes out of ourder, which
-        // is especially a problem when the same variable is written multiple times in one txn.
+        self.eval_inner(EvalTense::Present, ctx);
+    }
 
+    fn eval_inner(&mut self, tense: EvalTense, ctx: &mut impl ActionEvalContext<Ident>) {
         match self {
             Action::Seq(a, b) => {
-                a.eval(ctx);
-                b.eval(ctx);
+                a.eval_inner(tense, ctx);
+                b.eval_inner(tense.weaken(EvalTense::Future), ctx);
 
                 match (&mut **a, &mut **b) {
                     (Action::Nil, b) => *self = mem::replace(b, Action::Nil),
@@ -78,20 +91,45 @@ impl<Ident> Action<Ident> {
             Action::Write(address, expr) => {
                 expr.eval(ctx);
 
-                if let Expr::Value(_) = expr {
-                    // take the current value of self, replacing it with Action::Nil to signify completion
-                    let Action::Write(address, Expr::Value(value)) =
-                        mem::replace(self, Action::Nil)
-                    else {
-                        unreachable!()
-                    };
+                match tense {
+                    EvalTense::Present => {
+                        if let Expr::Value(_) = expr {
+                            // take the current value of self, replacing it with Action::Nil to signify completion
+                            let Action::Write(address, Expr::Value(value)) =
+                                mem::replace(self, Action::Nil)
+                            else {
+                                unreachable!()
+                            };
 
-                    ctx.write(&address, value);
-                } else {
-                    ctx.will_write(address);
+                            ctx.write(&address, value);
+                        } else {
+                            ctx.will_write(address);
+                        }
+                    }
+                    EvalTense::Future => ctx.will_write(address),
+                    EvalTense::Conditional => ctx.may_write(address),
                 }
             }
             Action::Nil => (),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum EvalTense {
+    Present,
+    Future,
+    Conditional,
+}
+
+impl EvalTense {
+    pub fn weaken(self, other: EvalTense) -> EvalTense {
+        match (self, other) {
+            (EvalTense::Present, _)
+            | (EvalTense::Future, EvalTense::Future)
+            | (EvalTense::Future, EvalTense::Conditional)
+            | (EvalTense::Conditional, EvalTense::Conditional) => other,
+            _ => self,
         }
     }
 }
