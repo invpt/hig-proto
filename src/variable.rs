@@ -86,7 +86,7 @@ impl Actor for Variable {
 
                 ctx.send(
                     sender,
-                    Message::Value {
+                    Message::ReadValue {
                         txid,
                         value: self.value.clone(),
                         predecessors: self.applied_transactions.clone(),

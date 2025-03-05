@@ -46,7 +46,7 @@ pub enum Message {
     Read {
         txid: TxId,
     },
-    Value {
+    ReadValue {
         txid: TxId,
         value: Value,
         predecessors: HashMap<TxId, TxMeta>,
@@ -136,8 +136,8 @@ pub struct TxMeta {
     pub affected: HashSet<Address>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
 pub enum LockKind {
-    Shared,
-    Exclusive,
+    Shared = 0,
+    Exclusive = 1,
 }
