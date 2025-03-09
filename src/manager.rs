@@ -33,6 +33,7 @@ struct Lock {
     kind: LockKind,
     value: LockValue,
     state: LockState,
+    did_write: bool,
 }
 
 enum LockValue {
@@ -79,7 +80,7 @@ impl Manager {
             address: ctx.me().clone(),
         };
 
-        let mut tx = Transaction {
+        let tx = Transaction {
             id: txid.clone(),
             action,
             may_write: HashSet::new(),
@@ -87,9 +88,9 @@ impl Manager {
             locks: HashMap::new(),
         };
 
-        tx.eval(self, ctx);
-
-        self.transactions.insert(txid, Some(tx));
+        if let Some(tx) = tx.eval(self, ctx) {
+            self.transactions.insert(txid, Some(tx));
+        }
     }
 }
 
@@ -129,9 +130,9 @@ impl Actor for Manager {
 
                 lock.send_request(&txid, &ctx);
 
-                tx.eval(self, &ctx);
-
-                self.transactions.insert(txid, Some(tx));
+                if let Some(tx) = tx.eval(self, &ctx) {
+                    self.transactions.insert(txid, Some(tx));
+                }
             }
             Message::ReadValue {
                 txid,
@@ -153,9 +154,9 @@ impl Actor for Manager {
                     tx.predecessors.insert(txid, meta);
                 }
 
-                tx.eval(self, &ctx);
-
-                self.transactions.insert(txid, Some(tx));
+                if let Some(tx) = tx.eval(self, &ctx) {
+                    self.transactions.insert(txid, Some(tx));
+                }
             }
             _ => todo!(),
         }
@@ -163,12 +164,49 @@ impl Actor for Manager {
 }
 
 impl Transaction {
-    pub fn eval(&mut self, mgr: &Manager, ctx: &Context) {
+    pub fn eval(mut self, mgr: &Manager, ctx: &Context) -> Option<Self> {
         let mut action = mem::replace(&mut self.action, Action::Nil);
         self.may_write.clear();
-        action.traverse(&mut ActionContext { tx: self, mgr, ctx });
-        action.eval(&mut ActionContext { tx: self, mgr, ctx });
-        self.action = action;
+        action.traverse(&mut ActionContext {
+            tx: &mut self,
+            mgr,
+            ctx,
+        });
+        action.eval(&mut ActionContext {
+            tx: &mut self,
+            mgr,
+            ctx,
+        });
+
+        if let Action::Nil = action {
+            // complete the txn
+
+            let affected = self
+                .locks
+                .values()
+                .filter(|l| l.did_write)
+                .map(|l| l.address.clone())
+                .collect::<HashSet<_>>();
+
+            let mut predecessors = self.predecessors;
+            predecessors.insert(self.id.clone(), TxMeta { affected });
+
+            for (_, lock) in self.locks {
+                ctx.send(
+                    lock.address,
+                    Message::Release {
+                        txid: self.id.clone(),
+                        predecessors: predecessors.clone(),
+                    },
+                );
+            }
+
+            None
+        } else {
+            self.action = action;
+
+            Some(self)
+        }
     }
 
     fn lock(
@@ -234,6 +272,7 @@ impl Transaction {
                     } else {
                         LockState::Pending
                     },
+                    did_write: false,
                 },
             );
 
@@ -289,6 +328,8 @@ impl Lock {
                 );
 
                 *slot = WriteRequest::None;
+
+                self.did_write = true;
             }
             LockValue::Some(_, WriteRequest::None) => {}
         }
@@ -313,9 +354,9 @@ impl<'a, 'c> ActionEvalContext<Address> for ActionContext<'a, 'c> {
     }
 }
 
-// TODO: request some locks in advance?
 impl<'a, 'c> ActionTraversalContext<Address> for ActionContext<'a, 'c> {
     fn will_write(&mut self, address: &Address) {
+        // TODO: request some locks in advance?
         self.tx.may_write.insert(address.clone());
     }
 
@@ -341,9 +382,9 @@ impl<'a, 'c> ExprEvalContext<Address> for ActionContext<'a, 'c> {
     }
 }
 
-// TODO: request some locks in advance?
 impl<'a, 'c> ExprTraversalContext<Address> for ActionContext<'a, 'c> {
     fn will_read(&mut self, ident: &Address) {
+        // TODO: request some locks in advance?
         _ = ident;
     }
 
