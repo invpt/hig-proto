@@ -27,7 +27,7 @@ pub trait Actor: Send {
         _ = ctx;
     }
 
-    fn handle(&mut self, sender: Address, message: Message, ctx: Context);
+    fn handle(&mut self, message: Message, ctx: Context);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -61,7 +61,6 @@ impl System {
                 .expect("invariant broken: actor was checked out during run step");
 
             actor.handle(
-                queued.sender,
                 queued.message,
                 Context {
                     system: RefCell::new(self),
@@ -106,11 +105,11 @@ impl<'a> Context<'a> {
     }
 
     /// Queues `message` to be sent to and handled by `target`.
-    pub fn send(&self, target: Address, message: Message) {
+    pub fn send(&self, target: &Address, message: Message) {
         let message = message.into();
         self.system.borrow_mut().queue.push_back(QueuedMessage {
             sender: self.me.clone(),
-            target,
+            target: target.clone(),
             message,
         });
     }

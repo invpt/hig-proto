@@ -18,6 +18,7 @@ pub enum Message {
 
     // propagation
     Update {
+        sender: Address,
         value: Value,
         predecessors: HashMap<TxId, TxMeta>,
     },

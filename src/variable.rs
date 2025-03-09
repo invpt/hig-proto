@@ -26,7 +26,7 @@ impl Variable {
 }
 
 impl Actor for Variable {
-    fn handle(&mut self, sender: Address, message: Message, ctx: Context) {
+    fn handle(&mut self, message: Message, ctx: Context) {
         let message = 'unhandled: {
             match self.lock.handle(
                 message,
@@ -61,12 +61,13 @@ impl Actor for Variable {
                                 }
 
                                 let message = Message::Update {
+                                    sender: ctx.me().clone(),
                                     value: self.value.clone(),
                                     predecessors: self.applied_transactions.clone(),
                                 };
 
                                 for address in &self.subscribers {
-                                    ctx.send(address.clone(), message.clone());
+                                    ctx.send(&address, message.clone());
                                 }
                             }
                             ExclusiveLockState::Retire => ctx.retire(),
@@ -96,9 +97,9 @@ impl Actor for Variable {
                 }
 
                 ctx.send(
-                    sender,
+                    &txid.address,
                     Message::ReadValue {
-                        txid,
+                        txid: txid.clone(),
                         value: self.value.clone(),
                         predecessors: self.applied_transactions.clone(),
                     },

@@ -83,7 +83,7 @@ where
 
                 if predecessors.is_empty() && !inputs.is_empty() {
                     ctx.send(
-                        txid.address.clone(),
+                        &txid.address,
                         Message::LockRejected {
                             txid: txid.clone(),
                             needs_predecessors_from_inputs: inputs.clone(),
@@ -245,7 +245,7 @@ where
         for txid in granted {
             self.queue.remove(&txid);
             ctx.send(
-                txid.address.clone(),
+                &txid.address,
                 Message::LockGranted {
                     txid: txid.clone(),
                     predecessors: completed.clone(),
@@ -258,10 +258,7 @@ where
     // of self while calling this function
     fn preempt(txid: &TxId, preemptions: &mut HashSet<TxId>, ctx: &Context) {
         if !preemptions.contains(txid) {
-            ctx.send(
-                txid.address.clone(),
-                Message::Preempt { txid: txid.clone() },
-            );
+            ctx.send(&txid.address, Message::Preempt { txid: txid.clone() });
             preemptions.insert(txid.clone());
         }
     }

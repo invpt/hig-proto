@@ -168,6 +168,7 @@ impl Definition {
         };
 
         let message = Message::Update {
+            sender: ctx.me().clone(),
             value,
             predecessors: batch
                 .iter()
@@ -191,7 +192,7 @@ impl Definition {
         };
 
         for sub in &self.subscribers {
-            ctx.send(sub.clone(), message.clone());
+            ctx.send(sub, message.clone());
         }
 
         for txid in batch {
@@ -208,7 +209,7 @@ impl Definition {
 }
 
 impl Actor for Definition {
-    fn handle(&mut self, sender: Address, message: Message, ctx: Context) {
+    fn handle(&mut self, message: Message, ctx: Context) {
         let message = 'unhandled: {
             match self.lock.handle(
                 message,
@@ -245,6 +246,7 @@ impl Actor for Definition {
 
         match message {
             Message::Update {
+                sender,
                 value,
                 predecessors,
             } => {

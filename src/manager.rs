@@ -95,7 +95,7 @@ impl Manager {
 }
 
 impl Actor for Manager {
-    fn handle(&mut self, sender: Address, message: Message, ctx: Context) {
+    fn handle(&mut self, message: Message, ctx: Context) {
         match message {
             Message::Do { action } => self.do_action(action, &ctx),
             Message::LockRejected {
@@ -103,13 +103,13 @@ impl Actor for Manager {
                 needs_predecessors_from_inputs,
             } => {
                 self.node_inputs
-                    .insert(sender.clone(), needs_predecessors_from_inputs);
+                    .insert(txid.address.clone(), needs_predecessors_from_inputs);
 
                 let tx = self.transactions.get_mut(&txid).unwrap().as_mut().unwrap();
 
                 let lock = tx
                     .locks
-                    .get_mut(&sender)
+                    .get_mut(&txid.address)
                     .expect("received lock granted from unknown lock");
 
                 assert!(matches!(lock.state, LockState::Requested));
@@ -121,7 +121,7 @@ impl Actor for Manager {
 
                 let lock = tx
                     .locks
-                    .get_mut(&sender)
+                    .get_mut(&txid.address)
                     .expect("received lock granted from unknown lock");
 
                 assert!(matches!(lock.state, LockState::Requested));
@@ -143,7 +143,7 @@ impl Actor for Manager {
 
                 let lock = tx
                     .locks
-                    .get_mut(&sender)
+                    .get_mut(&txid.address)
                     .expect("received value from unknown lock");
 
                 assert!(matches!(lock.value, LockValue::None(ReadRequest::Pending)));
@@ -193,7 +193,7 @@ impl Transaction {
 
             for (_, lock) in self.locks {
                 ctx.send(
-                    lock.address,
+                    &lock.address,
                     Message::Release {
                         txid: self.id.clone(),
                         predecessors: predecessors.clone(),
@@ -252,7 +252,7 @@ impl Transaction {
 
             if all_held {
                 ctx.send(
-                    address.clone(),
+                    address,
                     Message::Lock {
                         txid: self.id.clone(),
                         kind,
@@ -314,13 +314,13 @@ impl Lock {
 
         match &mut self.value {
             LockValue::None(slot @ ReadRequest::Unsent) => {
-                ctx.send(self.address.clone(), Message::Read { txid: txid.clone() });
+                ctx.send(&self.address, Message::Read { txid: txid.clone() });
                 *slot = ReadRequest::Pending;
             }
             LockValue::None(ReadRequest::None | ReadRequest::Pending) => {}
             LockValue::Some(value, slot @ WriteRequest::Unsent) => {
                 ctx.send(
-                    self.address.clone(),
+                    &self.address,
                     Message::Write {
                         txid: txid.clone(),
                         value: value.clone(),
