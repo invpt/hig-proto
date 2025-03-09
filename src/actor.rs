@@ -5,7 +5,7 @@ use std::{
 
 use crate::message::Message;
 
-pub struct Router {
+pub struct System {
     address_counter: usize,
     queue: VecDeque<QueuedMessage>,
     actors: HashMap<Address, Option<Box<dyn Actor>>>,
@@ -18,7 +18,7 @@ struct QueuedMessage {
 }
 
 pub struct Context<'a> {
-    router: RefCell<&'a mut Router>,
+    system: RefCell<&'a mut System>,
     me: Address,
 }
 
@@ -35,7 +35,7 @@ pub struct Address {
     index: usize,
 }
 
-impl Router {
+impl System {
     pub fn run(&mut self) {
         while let Some(queued) = self.queue.pop_front() {
             let Some(actor) = self.actors.get_mut(&queued.target) else {
@@ -64,7 +64,7 @@ impl Router {
                 queued.sender,
                 queued.message,
                 Context {
-                    router: RefCell::new(self),
+                    system: RefCell::new(self),
                     me: queued.target.clone(),
                 },
             );
@@ -88,7 +88,7 @@ impl Router {
         let mut actor = Box::new(actor(address.clone()));
         self.actors.insert(address.clone(), None);
         actor.init(Context {
-            router: RefCell::new(self),
+            system: RefCell::new(self),
             me: address.clone(),
         });
         if let Some(entry) = self.actors.get_mut(&address) {
@@ -108,7 +108,7 @@ impl<'a> Context<'a> {
     /// Queues `message` to be sent to and handled by `target`.
     pub fn send(&self, target: Address, message: Message) {
         let message = message.into();
-        self.router.borrow_mut().queue.push_back(QueuedMessage {
+        self.system.borrow_mut().queue.push_back(QueuedMessage {
             sender: self.me.clone(),
             target,
             message,
@@ -117,11 +117,11 @@ impl<'a> Context<'a> {
 
     /// Spawns a new actor.
     pub fn spawn(&self, actor: impl Actor + 'static) -> Address {
-        self.router.borrow_mut().spawn(actor)
+        self.system.borrow_mut().spawn(actor)
     }
 
     /// Retires this actor, meaning it will no longer be asked to handle messages.
     pub fn retire(self) {
-        self.router.borrow_mut().actors.remove(&self.me);
+        self.system.borrow_mut().actors.remove(&self.me);
     }
 }
