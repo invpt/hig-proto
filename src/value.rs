@@ -4,12 +4,6 @@ use crate::actor::Address;
 
 #[derive(Debug, Clone)]
 pub enum Value {
-    Definition {
-        address: Address,
-        inputs: HashMap<Address, Value>,
-    },
-    Variable {
-        address: Address,
-        sequence: usize,
-    },
+    Tuple(Box<[Value]>),
+    Integer(isize),
 }

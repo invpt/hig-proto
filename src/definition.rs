@@ -2,6 +2,7 @@ use std::collections::{hash_map::Entry, HashMap, HashSet};
 
 use crate::{
     actor::{Actor, Address, Context},
+    expr::Expr,
     lock::{Lock, LockEvent},
     message::{Message, TxId, TxMeta},
     value::Value,
@@ -9,8 +10,10 @@ use crate::{
 
 pub struct Definition {
     lock: Lock<SharedLockState, ExclusiveLockState>,
-    replicas: HashMap<Address, Option<Value>>,
+    replicas: HashMap<Address, Value>,
     ancestor_variable_to_inputs: HashMap<Address, Vec<Address>>,
+    expr: Expr,
+    value: Value,
     subscribers: HashSet<Address>,
     applied_transactions: HashSet<TxId>,
     transactions: HashMap<TxId, PendingTransaction>,
@@ -28,6 +31,7 @@ struct ReceivedUpdateId(usize);
 
 pub struct InputMetadata {
     pub ancestor_variables: Box<[Address]>,
+    pub current_value: Value,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -42,10 +46,14 @@ struct ReceivedUpdate {
 }
 
 impl Definition {
-    fn new(inputs: HashMap<Address, InputMetadata>, subscribers: HashSet<Address>) -> Definition {
+    fn new(
+        inputs: HashMap<Address, InputMetadata>,
+        expr: Expr,
+        subscribers: HashSet<Address>,
+    ) -> Definition {
         let mut ancestor_variable_to_inputs = HashMap::<Address, Vec<Address>>::new();
-        for (input, ancestors) in &inputs {
-            for ancestor in &ancestors.ancestor_variables {
+        for (input, meta) in &inputs {
+            for ancestor in &meta.ancestor_variables {
                 match ancestor_variable_to_inputs.entry(ancestor.clone()) {
                     Entry::Occupied(mut e) => {
                         e.get_mut().push(input.clone());
@@ -57,11 +65,24 @@ impl Definition {
             }
         }
 
+        let mut replicas = inputs
+            .into_iter()
+            .map(|(a, i)| (a, i.current_value))
+            .collect();
+
+        let mut expr_copy = expr.clone();
+        expr_copy.eval(&mut replicas);
+        let Expr::Value(value) = expr_copy else {
+            panic!("def expression did not fully evaluate")
+        };
+
         Definition {
             lock: Lock::new(),
-            replicas: inputs.keys().map(|a| (a.clone(), None)).collect(),
+            replicas,
             ancestor_variable_to_inputs,
             subscribers,
+            expr,
+            value,
             transactions: HashMap::new(),
             updates: HashMap::new(),
             applied_transactions: HashSet::new(),
@@ -132,29 +153,22 @@ impl Definition {
 
         for id in update_ids {
             let update = self.updates.remove(&id).expect("could not locate update");
-            self.replicas.insert(update.address, Some(update.value));
-        }
-
-        let replicas_complete = self.replicas.values().all(Option::is_some);
-        if !replicas_complete {
-            return;
+            self.replicas.insert(update.address, update.value);
         }
 
         let mut inputs = HashMap::<Address, Value>::new();
         for (address, value) in &self.replicas {
-            let Some(value) = value else {
-                // if one of our inputs is still missing a value, we can't send an update
-                return;
-            };
-
             inputs.insert(address.clone(), value.clone());
         }
 
+        let mut expr_copy = self.expr.clone();
+        expr_copy.eval(&mut self.replicas);
+        let Expr::Value(value) = expr_copy else {
+            panic!("def expression did not fully evaluate")
+        };
+
         let message = Message::Update {
-            value: Value::Definition {
-                address: ctx.me().clone(),
-                inputs,
-            },
+            value,
             predecessors: batch
                 .iter()
                 .cloned()

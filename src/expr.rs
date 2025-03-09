@@ -29,6 +29,7 @@ pub enum UpgradeIdent {
 #[derive(Clone)]
 pub enum Expr<Ident = Address> {
     // TODO: more exprs
+    Tuple(Box<[Expr<Ident>]>),
     Read(Ident),
     Value(Value),
 }

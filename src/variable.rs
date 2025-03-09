@@ -14,6 +14,17 @@ pub struct Variable {
     value: Value,
 }
 
+impl Variable {
+    pub fn new(value: Value, subscribers: HashSet<Address>) -> Variable {
+        Variable {
+            lock: Lock::new(),
+            applied_transactions: HashMap::new(),
+            subscribers,
+            value,
+        }
+    }
+}
+
 impl Actor for Variable {
     fn handle(&mut self, sender: Address, message: Message, ctx: Context) {
         let message = 'unhandled: {

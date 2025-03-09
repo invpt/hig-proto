@@ -1,4 +1,4 @@
-use std::mem;
+use std::{collections::HashMap, hash::Hash, mem};
 
 use crate::value::Value;
 
@@ -109,6 +109,29 @@ impl<Ident> Expr<Ident> {
     /// When `self` is an [`Expr::Value`], no further evaulation will be done.
     pub fn eval(&mut self, ctx: &mut impl ExprEvalContext<Ident>) {
         match self {
+            Expr::Tuple(items) => {
+                let mut all_evaled = true;
+                for item in items.iter_mut() {
+                    item.eval(ctx);
+                    if !matches!(item, Expr::Value(_)) {
+                        all_evaled = false;
+                    }
+                }
+
+                if all_evaled {
+                    let items = mem::replace(items, Box::from([]));
+                    let mut values = Vec::with_capacity(items.len());
+                    for item in items {
+                        let Expr::Value(value) = item else {
+                            unreachable!()
+                        };
+
+                        values.push(value);
+                    }
+
+                    *self = Expr::Value(Value::Tuple(values.into_boxed_slice()))
+                }
+            }
             Expr::Read(ident) => match ctx.read(ident) {
                 Some(value) => *self = Expr::Value(value),
                 None => (),
@@ -123,6 +146,11 @@ impl<Ident> Expr<Ident> {
 
     fn traverse_inner(&mut self, conditional: bool, ctx: &mut impl ExprTraversalContext<Ident>) {
         match self {
+            Expr::Tuple(items) => {
+                for item in items {
+                    item.traverse_inner(conditional, ctx);
+                }
+            }
             Expr::Read(ident) => {
                 if conditional {
                     ctx.may_read(ident);
@@ -132,5 +160,11 @@ impl<Ident> Expr<Ident> {
             }
             Expr::Value(_) => {}
         }
+    }
+}
+
+impl<Ident: Hash + Eq> ExprEvalContext<Ident> for HashMap<Ident, Value> {
+    fn read(&mut self, ident: &Ident) -> Option<Value> {
+        self.get(ident).cloned()
     }
 }
