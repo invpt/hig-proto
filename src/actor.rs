@@ -36,6 +36,14 @@ pub struct Address {
 }
 
 impl System {
+    pub fn new() -> System {
+        System {
+            address_counter: 0,
+            queue: VecDeque::new(),
+            actors: HashMap::new(),
+        }
+    }
+
     pub fn run(&mut self) {
         while let Some(queued) = self.queue.pop_front() {
             let Some(actor) = self.actors.get_mut(&queued.target) else {

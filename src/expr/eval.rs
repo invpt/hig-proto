@@ -1,8 +1,20 @@
 use std::{collections::HashMap, hash::Hash, mem};
 
-use crate::value::Value;
+use crate::{actor::Address, value::Value};
 
-use super::{Action, Expr};
+use super::{Action, Expr, Name, Upgrade, UpgradeIdent};
+
+pub trait UpgradeEvalContext: ActionEvalContext<UpgradeIdent> {
+    fn var(&mut self, name: Name, value: Value);
+    fn def(&mut self, name: Name, expr: Expr<UpgradeIdent>);
+    fn del(&mut self, address: Address);
+}
+
+pub trait UpgradeTraversalContext: ActionTraversalContext<UpgradeIdent> {
+    fn will_var(&mut self, name: Name);
+    fn will_def(&mut self, name: Name);
+    fn will_del(&mut self, address: Address);
+}
 
 pub trait ActionEvalContext<Ident>: ExprEvalContext<Ident> {
     /// Writes to the node referenced by `ident` with the given `value`.
@@ -46,6 +58,40 @@ pub trait ExprTraversalContext<Ident> {
     /// to `read`.
     fn may_read(&mut self, ident: &Ident) {
         _ = ident;
+    }
+}
+
+impl Upgrade {
+    pub fn eval(&mut self, ctx: &mut impl UpgradeEvalContext) {
+        match self {
+            Upgrade::Seq(a, b) => {
+                a.eval(ctx);
+                if let Upgrade::Nil = &**a {
+                    b.eval(ctx);
+
+                    *self = mem::replace(b, Upgrade::Nil);
+                }
+            }
+            Upgrade::Var(_, expr) => {
+                expr.eval(ctx);
+                if let Expr::Value(_) = expr {
+                    let Upgrade::Var(name, Expr::Value(value)) = mem::replace(self, Upgrade::Nil)
+                    else {
+                        unreachable!()
+                    };
+
+                    ctx.var(name, value);
+                }
+            }
+            Upgrade::Def(name, expr) => {
+                todo!()
+            }
+            _ => todo!(),
+        }
+    }
+
+    pub fn traverse(&mut self, ctx: &mut impl UpgradeTraversalContext) {
+        todo!()
     }
 }
 

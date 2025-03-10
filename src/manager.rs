@@ -1,14 +1,17 @@
 use std::{
-    cell::RefCell,
-    collections::{hash_map::Entry, HashMap, HashSet},
+    collections::{HashMap, HashSet},
+    f32::consts::PI,
     mem,
 };
 
 use crate::{
     actor::{Actor, Address, Context},
     expr::{
-        eval::{ActionEvalContext, ActionTraversalContext, ExprEvalContext, ExprTraversalContext},
-        Action,
+        eval::{
+            ActionEvalContext, ActionTraversalContext, ExprEvalContext, ExprTraversalContext,
+            UpgradeEvalContext, UpgradeTraversalContext,
+        },
+        Action, Expr, Name, Upgrade, UpgradeIdent,
     },
     message::{LockKind, Message, MonotonicTimestampGenerator, TxId, TxKind, TxMeta},
     value::Value,
@@ -22,10 +25,15 @@ pub struct Manager {
 
 struct Transaction {
     id: TxId,
-    action: Action,
+    kind: TransactionKind,
     may_write: HashSet<Address>,
     predecessors: HashMap<TxId, TxMeta>,
     locks: HashMap<Address, Lock>,
+}
+
+enum TransactionKind {
+    Action(Action),
+    Upgrade(Upgrade),
 }
 
 struct Lock {
@@ -82,7 +90,7 @@ impl Manager {
 
         let tx = Transaction {
             id: txid.clone(),
-            action,
+            kind: TransactionKind::Action(action),
             may_write: HashSet::new(),
             predecessors: HashMap::new(),
             locks: HashMap::new(),
@@ -165,47 +173,71 @@ impl Actor for Manager {
 
 impl Transaction {
     pub fn eval(mut self, mgr: &Manager, ctx: &Context) -> Option<Self> {
-        let mut action = mem::replace(&mut self.action, Action::Nil);
-        self.may_write.clear();
-        action.traverse(&mut ActionContext {
-            tx: &mut self,
-            mgr,
-            ctx,
-        });
-        action.eval(&mut ActionContext {
-            tx: &mut self,
-            mgr,
-            ctx,
-        });
+        match &mut self.kind {
+            TransactionKind::Action(action) => {
+                let mut action = mem::replace(action, Action::Nil);
+                self.may_write.clear();
+                action.traverse(&mut TransactionContext {
+                    tx: &mut self,
+                    mgr,
+                    ctx,
+                });
+                action.eval(&mut TransactionContext {
+                    tx: &mut self,
+                    mgr,
+                    ctx,
+                });
 
-        if let Action::Nil = action {
-            // complete the txn
+                if let Action::Nil = action {
+                    // complete the txn
 
-            let affected = self
-                .locks
-                .values()
-                .filter(|l| l.did_write)
-                .map(|l| l.address.clone())
-                .collect::<HashSet<_>>();
+                    let affected = self
+                        .locks
+                        .values()
+                        .filter(|l| l.did_write)
+                        .map(|l| l.address.clone())
+                        .collect::<HashSet<_>>();
 
-            let mut predecessors = self.predecessors;
-            predecessors.insert(self.id.clone(), TxMeta { affected });
+                    let mut predecessors = self.predecessors;
+                    predecessors.insert(self.id.clone(), TxMeta { affected });
 
-            for (_, lock) in self.locks {
-                ctx.send(
-                    &lock.address,
-                    Message::Release {
-                        txid: self.id.clone(),
-                        predecessors: predecessors.clone(),
-                    },
-                );
+                    for (_, lock) in self.locks {
+                        ctx.send(
+                            &lock.address,
+                            Message::Release {
+                                txid: self.id.clone(),
+                                predecessors: predecessors.clone(),
+                            },
+                        );
+                    }
+
+                    None
+                } else {
+                    self.kind = TransactionKind::Action(action);
+
+                    Some(self)
+                }
             }
+            TransactionKind::Upgrade(upgrade) => {
+                let mut upgrade = mem::replace(upgrade, Upgrade::Nil);
+                self.may_write.clear();
+                upgrade.traverse(&mut TransactionContext {
+                    tx: &mut self,
+                    mgr,
+                    ctx,
+                });
+                upgrade.eval(&mut TransactionContext {
+                    tx: &mut self,
+                    mgr,
+                    ctx,
+                });
 
-            None
-        } else {
-            self.action = action;
-
-            Some(self)
+                if let Upgrade::Nil = upgrade {
+                    todo!()
+                } else {
+                    todo!()
+                }
+            }
         }
     }
 
@@ -336,13 +368,41 @@ impl Lock {
     }
 }
 
-struct ActionContext<'a, 'c> {
+struct TransactionContext<'a, 'c> {
     tx: &'a mut Transaction,
     mgr: &'a Manager,
     ctx: &'a Context<'c>,
 }
 
-impl<'a, 'c> ActionEvalContext<Address> for ActionContext<'a, 'c> {
+impl<'a, 'c> UpgradeEvalContext for TransactionContext<'a, 'c> {
+    fn var(&mut self, name: Name, value: Value) {
+        todo!()
+    }
+
+    fn def(&mut self, name: Name, expr: Expr<UpgradeIdent>) {
+        todo!()
+    }
+
+    fn del(&mut self, address: Address) {
+        todo!()
+    }
+}
+
+impl<'a, 'c> UpgradeTraversalContext for TransactionContext<'a, 'c> {
+    fn will_var(&mut self, name: Name) {
+        todo!()
+    }
+
+    fn will_def(&mut self, name: Name) {
+        todo!()
+    }
+
+    fn will_del(&mut self, address: Address) {
+        todo!()
+    }
+}
+
+impl<'a, 'c> ActionEvalContext<Address> for TransactionContext<'a, 'c> {
     fn write(&mut self, address: &Address, value: Value) {
         self.tx.lock(
             address,
@@ -354,7 +414,16 @@ impl<'a, 'c> ActionEvalContext<Address> for ActionContext<'a, 'c> {
     }
 }
 
-impl<'a, 'c> ActionTraversalContext<Address> for ActionContext<'a, 'c> {
+impl<'a, 'c> ActionEvalContext<UpgradeIdent> for TransactionContext<'a, 'c> {
+    fn write(&mut self, ident: &UpgradeIdent, value: Value) {
+        match ident {
+            UpgradeIdent::New(name) => todo!(),
+            UpgradeIdent::Existing(address) => self.write(address, value),
+        }
+    }
+}
+
+impl<'a, 'c> ActionTraversalContext<Address> for TransactionContext<'a, 'c> {
     fn will_write(&mut self, address: &Address) {
         // TODO: request some locks in advance?
         self.tx.may_write.insert(address.clone());
@@ -365,7 +434,23 @@ impl<'a, 'c> ActionTraversalContext<Address> for ActionContext<'a, 'c> {
     }
 }
 
-impl<'a, 'c> ExprEvalContext<Address> for ActionContext<'a, 'c> {
+impl<'a, 'c> ActionTraversalContext<UpgradeIdent> for TransactionContext<'a, 'c> {
+    fn will_write(&mut self, ident: &UpgradeIdent) {
+        match ident {
+            UpgradeIdent::New(name) => todo!(),
+            UpgradeIdent::Existing(address) => self.will_write(address),
+        }
+    }
+
+    fn may_write(&mut self, ident: &UpgradeIdent) {
+        match ident {
+            UpgradeIdent::New(name) => todo!(),
+            UpgradeIdent::Existing(address) => self.may_write(address),
+        }
+    }
+}
+
+impl<'a, 'c> ExprEvalContext<Address> for TransactionContext<'a, 'c> {
     fn read(&mut self, address: &Address) -> Option<Value> {
         let lock = self.tx.lock(
             address,
@@ -382,7 +467,16 @@ impl<'a, 'c> ExprEvalContext<Address> for ActionContext<'a, 'c> {
     }
 }
 
-impl<'a, 'c> ExprTraversalContext<Address> for ActionContext<'a, 'c> {
+impl<'a, 'c> ExprEvalContext<UpgradeIdent> for TransactionContext<'a, 'c> {
+    fn read(&mut self, ident: &UpgradeIdent) -> Option<Value> {
+        match ident {
+            UpgradeIdent::New(name) => todo!(),
+            UpgradeIdent::Existing(address) => self.read(address),
+        }
+    }
+}
+
+impl<'a, 'c> ExprTraversalContext<Address> for TransactionContext<'a, 'c> {
     fn will_read(&mut self, ident: &Address) {
         // TODO: request some locks in advance?
         _ = ident;
@@ -390,5 +484,14 @@ impl<'a, 'c> ExprTraversalContext<Address> for ActionContext<'a, 'c> {
 
     fn may_read(&mut self, ident: &Address) {
         _ = ident;
+    }
+}
+
+impl<'a, 'c> ExprTraversalContext<UpgradeIdent> for TransactionContext<'a, 'c> {
+    fn will_read(&mut self, ident: &UpgradeIdent) {
+        match ident {
+            UpgradeIdent::New(name) => {}
+            UpgradeIdent::Existing(address) => self.will_read(address),
+        }
     }
 }
