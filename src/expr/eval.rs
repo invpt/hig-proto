@@ -1,48 +1,52 @@
-use std::{collections::HashMap, hash::Hash, mem};
+use std::{collections::HashMap, mem};
 
 use crate::{actor::Address, value::Value};
 
 use super::{Action, Expr, Name, Upgrade, UpgradeIdent};
 
-pub trait UpgradeEvalContext: ActionEvalContext<UpgradeIdent> {
+pub trait UpgradeEvalContext: ActionEvalContext + Resolver<UpgradeIdent> {
     fn var(&mut self, name: Name, value: Value);
-    fn def(&mut self, name: Name, expr: Expr<UpgradeIdent>);
+    fn def(&mut self, name: Name, expr: Expr);
     fn del(&mut self, address: Address);
 }
 
-pub trait UpgradeTraversalContext: ActionTraversalContext<UpgradeIdent> {
+pub trait UpgradeTraversalContext: ActionTraversalContext {
     fn will_var(&mut self, name: Name);
     fn will_def(&mut self, name: Name);
     fn will_del(&mut self, address: Address);
 }
 
-pub trait ActionEvalContext<Ident>: ExprEvalContext<Ident> {
-    /// Writes to the node referenced by `ident` with the given `value`.
-    fn write(&mut self, ident: &Ident, value: Value);
+pub trait ActionEvalContext: ExprEvalContext {
+    /// Writes to the node referenced by `address` with the given `value`.
+    fn write(&mut self, address: &Address, value: Value);
 }
 
-pub trait ActionTraversalContext<Ident>: ExprTraversalContext<Ident> {
-    /// Indicates that the node referenced by `ident` is guaranteed to be written to by a future
+pub trait ActionTraversalContext: ExprTraversalContext {
+    /// Indicates that the node referenced by `address` is guaranteed to be written to by a future
     /// call to `write`.
-    fn will_write(&mut self, ident: &Ident) {
-        _ = ident;
+    fn will_write(&mut self, address: &Address) {
+        _ = address;
     }
 
-    /// Indicates that the node referenced by `ident` may potentially be written to by a future
+    /// Indicates that the node referenced by `address` may potentially be written to by a future
     /// call to `write`.
-    fn may_write(&mut self, ident: &Ident) {
-        _ = ident;
+    fn may_write(&mut self, address: &Address) {
+        _ = address;
     }
 }
 
-pub trait ExprEvalContext<Ident> {
-    /// Reads the value held by the node referenced by `ident`.
+pub trait ExprEvalContext {
+    /// Reads the value held by the node referenced by `address`.
     ///
     /// If the value is not yet ready, this function may return `None` instead of a value.
-    fn read(&mut self, ident: &Ident) -> Option<Value>;
+    fn read(&mut self, address: &Address) -> Option<Value>;
 }
 
-pub trait ExprTraversalContext<Ident> {
+pub trait Resolver<Ident> {
+    fn resolve<'a>(&mut self, ident: &'a Ident) -> Option<&'a Address>;
+}
+
+pub trait ExprTraversalContext {
     /// Indicates that the node referenced by `ident` is guaranteed to be read with a future call
     /// to `read`.
     ///
@@ -50,14 +54,14 @@ pub trait ExprTraversalContext<Ident> {
     /// calling this method may occur following a conflicting read. So, while `read` indicates that
     /// the *currently held* value of an `ident` needs to be read, `will_read` indicates that some
     /// *future* value of an `ident` will need to be read.
-    fn will_read(&mut self, ident: &Ident) {
-        _ = ident;
+    fn will_read(&mut self, address: &Address) {
+        _ = address;
     }
 
     /// Indicates that the node referenced by `ident` may potentially be read with a future call
     /// to `read`.
-    fn may_read(&mut self, ident: &Ident) {
-        _ = ident;
+    fn may_read(&mut self, address: &Address) {
+        _ = address;
     }
 }
 
@@ -74,6 +78,7 @@ impl Upgrade {
             }
             Upgrade::Var(_, expr) => {
                 expr.eval(ctx);
+
                 if let Expr::Value(_) = expr {
                     let Upgrade::Var(name, Expr::Value(value)) = mem::replace(self, Upgrade::Nil)
                     else {
@@ -81,12 +86,35 @@ impl Upgrade {
                     };
 
                     ctx.var(name, value);
+                } else {
+                    panic!("var expr could not be fully evaluated")
                 }
             }
-            Upgrade::Def(name, expr) => {
-                todo!()
+            Upgrade::Def(_, expr) => {
+                let Some(expr) = (&*expr).resolve(ctx) else {
+                    panic!("def expr could not be fully resolved")
+                };
+
+                let Upgrade::Def(name, _) = mem::replace(self, Upgrade::Nil) else {
+                    unreachable!()
+                };
+
+                ctx.def(name, expr);
             }
-            _ => todo!(),
+            Upgrade::Del(_) => {
+                let Upgrade::Del(address) = mem::replace(self, Upgrade::Nil) else {
+                    unreachable!()
+                };
+
+                ctx.del(address);
+            }
+            Upgrade::Do(action) => {
+                action.eval(ctx);
+                if let Action::Nil = action {
+                    *self = Upgrade::Nil
+                }
+            }
+            Upgrade::Nil => {}
         }
     }
 
@@ -99,7 +127,10 @@ impl<Ident> Action<Ident> {
     /// Evaluates this action.
     ///
     /// When `self` is [`Action::Nil`], no further evaulation will be done.
-    pub fn eval(&mut self, ctx: &mut impl ActionEvalContext<Ident>) {
+    pub fn eval<C>(&mut self, ctx: &mut C)
+    where
+        C: ActionEvalContext + Resolver<Ident>,
+    {
         match self {
             Action::Seq(a, b) => {
                 a.eval(ctx);
@@ -109,28 +140,41 @@ impl<Ident> Action<Ident> {
                     *self = mem::replace(b, Action::Nil);
                 }
             }
-            Action::Write(_, expr) => {
+            Action::Write(ident, expr) => {
                 expr.eval(ctx);
 
-                if let Expr::Value(_) = expr {
-                    // take the current value of self, replacing it with Action::Nil to signify completion
-                    let Action::Write(ident, Expr::Value(value)) = mem::replace(self, Action::Nil)
-                    else {
-                        unreachable!()
-                    };
+                if ctx.resolve(ident).is_some() {
+                    if let Expr::Value(_) = expr {
+                        // take the current value of self, replacing it with Action::Nil to signify completion
+                        let Action::Write(ident, Expr::Value(value)) =
+                            mem::replace(self, Action::Nil)
+                        else {
+                            unreachable!()
+                        };
 
-                    ctx.write(&ident, value);
+                        let Some(address) = ctx.resolve(&ident) else {
+                            unreachable!()
+                        };
+
+                        ctx.write(address, value);
+                    }
                 }
             }
             Action::Nil => (),
         }
     }
 
-    pub fn traverse(&mut self, ctx: &mut impl ActionTraversalContext<Ident>) {
+    pub fn traverse<C>(&mut self, ctx: &mut C)
+    where
+        C: ActionTraversalContext + Resolver<Ident>,
+    {
         self.traverse_inner(false, ctx);
     }
 
-    fn traverse_inner(&mut self, conditional: bool, ctx: &mut impl ActionTraversalContext<Ident>) {
+    fn traverse_inner<C>(&mut self, conditional: bool, ctx: &mut C)
+    where
+        C: ActionTraversalContext + Resolver<Ident>,
+    {
         match self {
             Action::Seq(a, b) => {
                 a.traverse_inner(conditional, ctx);
@@ -138,10 +182,13 @@ impl<Ident> Action<Ident> {
             }
             Action::Write(ident, expr) => {
                 expr.traverse_inner(conditional, ctx);
-                if conditional {
-                    ctx.may_write(ident);
-                } else {
-                    ctx.will_write(ident);
+
+                if let Some(address) = ctx.resolve(ident) {
+                    if conditional {
+                        ctx.may_write(address);
+                    } else {
+                        ctx.will_write(address);
+                    }
                 }
             }
             Action::Nil => {}
@@ -153,7 +200,10 @@ impl<Ident> Expr<Ident> {
     /// Evaluates this expression.
     ///
     /// When `self` is an [`Expr::Value`], no further evaulation will be done.
-    pub fn eval(&mut self, ctx: &mut impl ExprEvalContext<Ident>) {
+    pub fn eval<C>(&mut self, ctx: &mut C)
+    where
+        C: ExprEvalContext + Resolver<Ident>,
+    {
         match self {
             Expr::Tuple(items) => {
                 let mut all_evaled = true;
@@ -178,19 +228,52 @@ impl<Ident> Expr<Ident> {
                     *self = Expr::Value(Value::Tuple(values.into_boxed_slice()))
                 }
             }
-            Expr::Read(ident) => match ctx.read(ident) {
-                Some(value) => *self = Expr::Value(value),
+            Expr::Read(ident) => match ctx.resolve(ident) {
+                Some(address) => match ctx.read(address) {
+                    Some(value) => *self = Expr::Value(value),
+                    None => (),
+                },
                 None => (),
             },
             Expr::Value(_) => (),
         }
     }
 
-    pub fn traverse(&mut self, ctx: &mut impl ExprTraversalContext<Ident>) {
+    fn resolve<C>(&self, ctx: &mut C) -> Option<Expr>
+    where
+        C: Resolver<Ident>,
+    {
+        match self {
+            Expr::Tuple(items) => {
+                let mut resolved = Vec::with_capacity(items.len());
+                for item in items {
+                    let Some(item) = item.resolve(ctx) else {
+                        return None;
+                    };
+                    resolved.push(item);
+                }
+
+                Some(Expr::Tuple(resolved.into_boxed_slice()))
+            }
+            Expr::Read(ident) => match ctx.resolve(&ident) {
+                Some(address) => Some(Expr::Read(address.clone())),
+                None => None,
+            },
+            Expr::Value(value) => Some(Expr::Value(value.clone())),
+        }
+    }
+
+    pub fn traverse<C>(&mut self, ctx: &mut C)
+    where
+        C: ExprTraversalContext + Resolver<Ident>,
+    {
         self.traverse_inner(false, ctx);
     }
 
-    fn traverse_inner(&mut self, conditional: bool, ctx: &mut impl ExprTraversalContext<Ident>) {
+    fn traverse_inner<C>(&mut self, conditional: bool, ctx: &mut C)
+    where
+        C: ExprTraversalContext + Resolver<Ident>,
+    {
         match self {
             Expr::Tuple(items) => {
                 for item in items {
@@ -198,10 +281,14 @@ impl<Ident> Expr<Ident> {
                 }
             }
             Expr::Read(ident) => {
+                let Some(address) = ctx.resolve(ident) else {
+                    return;
+                };
+
                 if conditional {
-                    ctx.may_read(ident);
+                    ctx.may_read(address);
                 } else {
-                    ctx.will_read(ident);
+                    ctx.will_read(address);
                 }
             }
             Expr::Value(_) => {}
@@ -209,8 +296,14 @@ impl<Ident> Expr<Ident> {
     }
 }
 
-impl<Ident: Hash + Eq> ExprEvalContext<Ident> for HashMap<Ident, Value> {
-    fn read(&mut self, ident: &Ident) -> Option<Value> {
-        self.get(ident).cloned()
+impl<C> Resolver<Address> for C {
+    fn resolve<'a>(&mut self, ident: &'a Address) -> Option<&'a Address> {
+        Some(ident)
+    }
+}
+
+impl ExprEvalContext for HashMap<Address, Value> {
+    fn read(&mut self, address: &Address) -> Option<Value> {
+        self.get(address).cloned()
     }
 }

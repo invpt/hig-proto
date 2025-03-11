@@ -9,7 +9,7 @@ use crate::{
     expr::{
         eval::{
             ActionEvalContext, ActionTraversalContext, ExprEvalContext, ExprTraversalContext,
-            UpgradeEvalContext, UpgradeTraversalContext,
+            Resolver, UpgradeEvalContext, UpgradeTraversalContext,
         },
         Action, Expr, Name, Upgrade, UpgradeIdent,
     },
@@ -379,7 +379,7 @@ impl<'a, 'c> UpgradeEvalContext for TransactionContext<'a, 'c> {
         todo!()
     }
 
-    fn def(&mut self, name: Name, expr: Expr<UpgradeIdent>) {
+    fn def(&mut self, name: Name, expr: Expr) {
         todo!()
     }
 
@@ -402,7 +402,7 @@ impl<'a, 'c> UpgradeTraversalContext for TransactionContext<'a, 'c> {
     }
 }
 
-impl<'a, 'c> ActionEvalContext<Address> for TransactionContext<'a, 'c> {
+impl<'a, 'c> ActionEvalContext for TransactionContext<'a, 'c> {
     fn write(&mut self, address: &Address, value: Value) {
         self.tx.lock(
             address,
@@ -414,16 +414,7 @@ impl<'a, 'c> ActionEvalContext<Address> for TransactionContext<'a, 'c> {
     }
 }
 
-impl<'a, 'c> ActionEvalContext<UpgradeIdent> for TransactionContext<'a, 'c> {
-    fn write(&mut self, ident: &UpgradeIdent, value: Value) {
-        match ident {
-            UpgradeIdent::New(name) => todo!(),
-            UpgradeIdent::Existing(address) => self.write(address, value),
-        }
-    }
-}
-
-impl<'a, 'c> ActionTraversalContext<Address> for TransactionContext<'a, 'c> {
+impl<'a, 'c> ActionTraversalContext for TransactionContext<'a, 'c> {
     fn will_write(&mut self, address: &Address) {
         // TODO: request some locks in advance?
         self.tx.may_write.insert(address.clone());
@@ -434,23 +425,7 @@ impl<'a, 'c> ActionTraversalContext<Address> for TransactionContext<'a, 'c> {
     }
 }
 
-impl<'a, 'c> ActionTraversalContext<UpgradeIdent> for TransactionContext<'a, 'c> {
-    fn will_write(&mut self, ident: &UpgradeIdent) {
-        match ident {
-            UpgradeIdent::New(name) => todo!(),
-            UpgradeIdent::Existing(address) => self.will_write(address),
-        }
-    }
-
-    fn may_write(&mut self, ident: &UpgradeIdent) {
-        match ident {
-            UpgradeIdent::New(name) => todo!(),
-            UpgradeIdent::Existing(address) => self.may_write(address),
-        }
-    }
-}
-
-impl<'a, 'c> ExprEvalContext<Address> for TransactionContext<'a, 'c> {
+impl<'a, 'c> ExprEvalContext for TransactionContext<'a, 'c> {
     fn read(&mut self, address: &Address) -> Option<Value> {
         let lock = self.tx.lock(
             address,
@@ -467,16 +442,7 @@ impl<'a, 'c> ExprEvalContext<Address> for TransactionContext<'a, 'c> {
     }
 }
 
-impl<'a, 'c> ExprEvalContext<UpgradeIdent> for TransactionContext<'a, 'c> {
-    fn read(&mut self, ident: &UpgradeIdent) -> Option<Value> {
-        match ident {
-            UpgradeIdent::New(name) => todo!(),
-            UpgradeIdent::Existing(address) => self.read(address),
-        }
-    }
-}
-
-impl<'a, 'c> ExprTraversalContext<Address> for TransactionContext<'a, 'c> {
+impl<'a, 'c> ExprTraversalContext for TransactionContext<'a, 'c> {
     fn will_read(&mut self, ident: &Address) {
         // TODO: request some locks in advance?
         _ = ident;
@@ -487,11 +453,11 @@ impl<'a, 'c> ExprTraversalContext<Address> for TransactionContext<'a, 'c> {
     }
 }
 
-impl<'a, 'c> ExprTraversalContext<UpgradeIdent> for TransactionContext<'a, 'c> {
-    fn will_read(&mut self, ident: &UpgradeIdent) {
+impl<'a, 'c> Resolver<UpgradeIdent> for TransactionContext<'a, 'c> {
+    fn resolve<'b>(&mut self, ident: &'b UpgradeIdent) -> Option<&'b Address> {
         match ident {
-            UpgradeIdent::New(name) => {}
-            UpgradeIdent::Existing(address) => self.will_read(address),
+            UpgradeIdent::New(_) => todo!(),
+            UpgradeIdent::Existing(address) => Some(address),
         }
     }
 }
