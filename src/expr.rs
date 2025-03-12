@@ -2,7 +2,7 @@ use crate::{actor::Address, value::Value};
 
 pub mod eval;
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq, Eq)]
 pub struct Name {
     pub text: String,
 }

@@ -1,5 +1,6 @@
 mod actor;
 mod definition;
+mod directory;
 mod expr;
 mod lock;
 mod manager;

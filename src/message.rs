@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     actor::Address,
-    expr::{Action, Upgrade},
+    expr::{Action, Name, Upgrade},
     value::Value,
 };
 
@@ -74,13 +74,29 @@ pub enum Message {
         predecessors: HashMap<TxId, TxMeta>,
     },
 
-    // messages handled by managers only
+    // messages sent/received by managers
     Do {
         action: Action,
     },
     Upgrade {
         upgrade: Upgrade,
     },
+    Directory {
+        state: DirectoryState,
+    },
+}
+
+#[derive(Clone)]
+pub struct DirectoryState {
+    pub peers: HashMap<Address, bool>,
+    pub nodes: HashMap<Name, DirectoryEntry>,
+}
+
+#[derive(Clone)]
+pub struct DirectoryEntry {
+    pub txid: TxId,
+    pub address: Address,
+    pub deleted: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
