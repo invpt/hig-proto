@@ -88,7 +88,7 @@ pub enum Message {
 
 #[derive(Clone)]
 pub struct DirectoryState {
-    pub peers: HashMap<Address, bool>,
+    pub managers: HashMap<Address, bool>,
     pub nodes: HashMap<Name, DirectoryEntry>,
 }
 

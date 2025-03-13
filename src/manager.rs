@@ -6,6 +6,7 @@ use std::{
 
 use crate::{
     actor::{Actor, Address, Context},
+    directory::{Directory, DirectoryEvent},
     expr::{
         eval::{
             ActionEvalContext, ActionTraversalContext, ExprEvalContext, ExprTraversalContext,
@@ -21,6 +22,7 @@ pub struct Manager {
     timestamp_generator: MonotonicTimestampGenerator,
     node_inputs: HashMap<Address, HashSet<Address>>,
     transactions: HashMap<TxId, Option<Transaction>>,
+    directory: Directory,
 }
 
 struct Transaction {
@@ -73,11 +75,12 @@ enum LockState {
 }
 
 impl Manager {
-    pub fn new() -> Manager {
+    pub fn new(seed_peers: impl Iterator<Item = Address>) -> Manager {
         Manager {
             timestamp_generator: MonotonicTimestampGenerator::new(),
             node_inputs: HashMap::new(),
             transactions: HashMap::new(),
+            directory: Directory::new(seed_peers),
         }
     }
 
@@ -103,7 +106,16 @@ impl Manager {
 }
 
 impl Actor for Manager {
+    fn init(&mut self, ctx: Context) {
+        self.directory.init(&ctx);
+    }
+
     fn handle(&mut self, message: Message, ctx: Context) {
+        let message = match self.directory.handle(message, &ctx) {
+            DirectoryEvent::UpdatedState => return,
+            DirectoryEvent::Unhandled(message) => message,
+        };
+
         match message {
             Message::Do { action } => self.do_action(action, &ctx),
             Message::LockRejected {
@@ -172,7 +184,7 @@ impl Actor for Manager {
 }
 
 impl Transaction {
-    pub fn eval(mut self, mgr: &Manager, ctx: &Context) -> Option<Self> {
+    pub fn eval(mut self, mgr: &mut Manager, ctx: &Context) -> Option<Self> {
         match &mut self.kind {
             TransactionKind::Action(action) => {
                 let mut action = mem::replace(action, Action::Nil);

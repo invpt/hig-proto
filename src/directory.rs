@@ -16,13 +16,17 @@ pub enum DirectoryEvent {
 }
 
 impl Directory {
-    pub fn new(&mut self, seed_peers: impl Iterator<Item = Address>) -> Directory {
+    pub fn new(seed_peers: impl Iterator<Item = Address>) -> Directory {
         Directory {
             state: DirectoryState {
-                peers: seed_peers.map(|peer| (peer, false)).collect(),
+                managers: seed_peers.map(|peer| (peer, false)).collect(),
                 nodes: HashMap::new(),
             },
         }
+    }
+
+    pub fn init(&mut self, ctx: &Context) {
+        self.state.managers.insert(ctx.me().clone(), false);
     }
 
     pub fn handle(&mut self, message: Message, ctx: &Context) -> DirectoryEvent {
@@ -36,23 +40,43 @@ impl Directory {
     }
 
     fn merge_and_update(&mut self, new_state: DirectoryState, ctx: &Context) {
-        let mut updated = false;
-        for (peer, deleted) in new_state.peers {
-            match self.state.peers.entry(peer.clone()) {
+        for (peer, deleted) in new_state.managers {
+            match self.state.managers.entry(peer.clone()) {
                 Entry::Vacant(entry) => {
-                    entry.insert_entry(deleted);
+                    entry.insert(deleted);
 
                     if !deleted {
-                        updated = true;
+                        // for each non-deleted new peer, send an introduction
+                        ctx.send(
+                            &peer,
+                            Message::Directory {
+                                state: self.state.clone(),
+                            },
+                        );
                     }
                 }
                 Entry::Occupied(mut entry) => {
                     let local_deleted = entry.get_mut();
-                    *local_deleted = *local_deleted || deleted;
+                    if deleted && !*local_deleted {
+                        *local_deleted = true;
+                    }
                 }
             }
         }
-        for (name, entry) in new_state.nodes {}
+
+        for (name, node) in new_state.nodes {
+            match self.state.nodes.entry(name.clone()) {
+                Entry::Vacant(entry) => {
+                    entry.insert(node);
+                }
+                Entry::Occupied(mut entry) => {
+                    let current = entry.get_mut();
+                    if node.txid > current.txid {
+                        *current = node;
+                    }
+                }
+            }
+        }
     }
 
     pub fn register(&mut self, name: Name, address: Address, txid: TxId, ctx: &Context) {
@@ -65,8 +89,8 @@ impl Directory {
             },
         );
 
-        for (peer, removed) in &self.state.peers {
-            if *removed {
+        for (peer, removed) in &self.state.managers {
+            if *removed || peer == ctx.me() {
                 continue;
             }
 
