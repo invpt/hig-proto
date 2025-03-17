@@ -89,14 +89,13 @@ pub enum Message {
 #[derive(Clone)]
 pub struct DirectoryState {
     pub managers: HashMap<Address, bool>,
-    pub nodes: HashMap<Name, DirectoryEntry>,
+    pub nodes: HashMap<Name, HashMap<TxId, DirectoryEntry>>,
 }
 
 #[derive(Clone)]
-pub struct DirectoryEntry {
-    pub txid: TxId,
-    pub address: Address,
-    pub deleted: bool,
+pub enum DirectoryEntry {
+    Exists { iteration: usize, address: Address },
+    Deleted,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

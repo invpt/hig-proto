@@ -40,6 +40,8 @@ impl Directory {
     }
 
     fn merge_and_update(&mut self, new_state: DirectoryState, ctx: &Context) {
+        let mut new_peers = Vec::new();
+
         for (peer, deleted) in new_state.managers {
             match self.state.managers.entry(peer.clone()) {
                 Entry::Vacant(entry) => {
@@ -47,12 +49,7 @@ impl Directory {
 
                     if !deleted {
                         // for each non-deleted new peer, send an introduction
-                        ctx.send(
-                            &peer,
-                            Message::Directory {
-                                state: self.state.clone(),
-                            },
-                        );
+                        new_peers.push(peer);
                     }
                 }
                 Entry::Occupied(mut entry) => {
@@ -64,30 +61,65 @@ impl Directory {
             }
         }
 
-        for (name, node) in new_state.nodes {
+        for (name, new_nodes) in new_state.nodes {
             match self.state.nodes.entry(name.clone()) {
                 Entry::Vacant(entry) => {
-                    entry.insert(node);
+                    entry.insert(new_nodes);
                 }
                 Entry::Occupied(mut entry) => {
-                    let current = entry.get_mut();
-                    if node.txid > current.txid {
-                        *current = node;
+                    let old_nodes = entry.get_mut();
+                    for (txid, new_node) in new_nodes {
+                        match old_nodes.entry(txid.clone()) {
+                            Entry::Vacant(entry) => {
+                                entry.insert(new_node);
+                            }
+                            Entry::Occupied(mut entry) => {
+                                let old_node = entry.get_mut();
+                                match (new_node, old_node) {
+                                    (_, DirectoryEntry::Deleted) => {}
+                                    (DirectoryEntry::Deleted, current) => {
+                                        *current = DirectoryEntry::Deleted
+                                    }
+                                    (
+                                        DirectoryEntry::Exists {
+                                            iteration: new_iteration,
+                                            address: new_address,
+                                        },
+                                        DirectoryEntry::Exists { iteration, address },
+                                    ) => {
+                                        if new_iteration > *iteration {
+                                            *iteration = new_iteration;
+                                            *address = new_address;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
+
+        for peer in new_peers {
+            ctx.send(
+                &peer,
+                Message::Directory {
+                    state: self.state.clone(),
+                },
+            );
+        }
     }
 
     pub fn register(&mut self, name: Name, address: Address, txid: TxId, ctx: &Context) {
-        self.state.nodes.insert(
+        todo!();
+        /*self.state.nodes.insert(
             name,
             DirectoryEntry {
                 txid,
                 address,
                 deleted: false,
             },
-        );
+        );*/
 
         for (peer, removed) in &self.state.managers {
             if *removed || peer == ctx.me() {
