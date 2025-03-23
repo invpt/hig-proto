@@ -219,7 +219,6 @@ impl Actor for Definition {
             ) {
                 LockEvent::Unhandled(message) => break 'unhandled message,
                 LockEvent::Queued { .. } => (),
-                LockEvent::Rejected { .. } => (),
                 LockEvent::Aborted { .. } => (),
                 LockEvent::Released { data, .. } => {
                     for (subscriber, subscribe) in data.shared.subscription_updates {

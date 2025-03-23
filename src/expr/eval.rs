@@ -5,20 +5,22 @@ use crate::{actor::Address, value::Value};
 use super::{Action, Expr, Name, Upgrade, UpgradeIdent};
 
 pub trait UpgradeEvalContext: ActionEvalContext + Resolver<UpgradeIdent> {
-    fn var(&mut self, name: Name, value: Value);
-    fn def(&mut self, name: Name, expr: Expr);
+    fn var(&mut self, name: Name, replace: Option<Address>, value: Value);
+    fn def(&mut self, name: Name, replace: Option<Address>, expr: Expr);
     fn del(&mut self, address: Address);
 }
 
 pub trait UpgradeTraversalContext: ActionTraversalContext {
-    fn will_var(&mut self, name: Name);
-    fn will_def(&mut self, name: Name);
+    fn will_var(&mut self, name: Name, replace: Option<Address>);
+    fn will_def(&mut self, name: Name, replace: Option<Address>);
     fn will_del(&mut self, address: Address);
 }
 
 pub trait ActionEvalContext: ExprEvalContext {
     /// Writes to the node referenced by `address` with the given `value`.
-    fn write(&mut self, address: &Address, value: Value);
+    ///
+    /// Returns true if the write was performed.
+    fn write(&mut self, address: &Address, value: &Value) -> bool;
 }
 
 pub trait ActionTraversalContext: ExprTraversalContext {
@@ -38,8 +40,8 @@ pub trait ActionTraversalContext: ExprTraversalContext {
 pub trait ExprEvalContext {
     /// Reads the value held by the node referenced by `address`.
     ///
-    /// If the value is not yet ready, this function may return `None` instead of a value.
-    fn read(&mut self, address: &Address) -> Option<Value>;
+    /// If the value is not yet ready, this function will return `None` instead of a value.
+    fn read(&mut self, address: &Address) -> Option<&Value>;
 }
 
 pub trait Resolver<Ident> {
@@ -76,30 +78,31 @@ impl Upgrade {
                     *self = mem::replace(b, Upgrade::Nil);
                 }
             }
-            Upgrade::Var(_, expr) => {
+            Upgrade::Var(_, _, expr) => {
                 expr.eval(ctx);
 
                 if let Expr::Value(_) = expr {
-                    let Upgrade::Var(name, Expr::Value(value)) = mem::replace(self, Upgrade::Nil)
+                    let Upgrade::Var(name, replace, Expr::Value(value)) =
+                        mem::replace(self, Upgrade::Nil)
                     else {
                         unreachable!()
                     };
 
-                    ctx.var(name, value);
+                    ctx.var(name, replace, value);
                 } else {
                     panic!("var expr could not be fully evaluated")
                 }
             }
-            Upgrade::Def(_, expr) => {
+            Upgrade::Def(_, _, expr) => {
                 let Some(expr) = (&*expr).resolve(ctx) else {
                     panic!("def expr could not be fully resolved")
                 };
 
-                let Upgrade::Def(name, _) = mem::replace(self, Upgrade::Nil) else {
+                let Upgrade::Def(name, replace, _) = mem::replace(self, Upgrade::Nil) else {
                     unreachable!()
                 };
 
-                ctx.def(name, expr);
+                ctx.def(name, replace, expr);
             }
             Upgrade::Del(_) => {
                 let Upgrade::Del(address) = mem::replace(self, Upgrade::Nil) else {
@@ -143,20 +146,11 @@ impl<Ident> Action<Ident> {
             Action::Write(ident, expr) => {
                 expr.eval(ctx);
 
-                if ctx.resolve(ident).is_some() {
-                    if let Expr::Value(_) = expr {
-                        // take the current value of self, replacing it with Action::Nil to signify completion
-                        let Action::Write(ident, Expr::Value(value)) =
-                            mem::replace(self, Action::Nil)
-                        else {
-                            unreachable!()
-                        };
-
-                        let Some(address) = ctx.resolve(&ident) else {
-                            unreachable!()
-                        };
-
-                        ctx.write(address, value);
+                if let Expr::Value(value) = expr {
+                    if let Some(address) = ctx.resolve(ident) {
+                        if ctx.write(address, value) {
+                            *self = Action::Nil;
+                        }
                     }
                 }
             }
@@ -230,7 +224,7 @@ impl<Ident> Expr<Ident> {
             }
             Expr::Read(ident) => match ctx.resolve(ident) {
                 Some(address) => match ctx.read(address) {
-                    Some(value) => *self = Expr::Value(value),
+                    Some(value) => *self = Expr::Value(value.clone()),
                     None => (),
                 },
                 None => (),
@@ -303,7 +297,7 @@ impl<C> Resolver<Address> for C {
 }
 
 impl ExprEvalContext for HashMap<Address, Value> {
-    fn read(&mut self, address: &Address) -> Option<Value> {
-        self.get(address).cloned()
+    fn read(&mut self, address: &Address) -> Option<&Value> {
+        self.get(address)
     }
 }

@@ -17,10 +17,6 @@ pub enum LockEvent<S, E> {
         txid: TxId,
         kind: LockKind,
     },
-    Rejected {
-        txid: TxId,
-        kind: LockKind,
-    },
     Aborted {
         txid: TxId,
         data: LockData<S, E>,
@@ -45,7 +41,6 @@ enum HeldLocks<S, E> {
 
 struct QueuedLock {
     kind: LockKind,
-    predecessors: HashSet<TxId>,
 }
 
 impl<S, E> Lock<S, E>
@@ -65,35 +60,19 @@ where
         &mut self,
         message: Message,
         ctx: &Context,
-        inputs: &HashSet<Address>,
+        ancestor_vars: &HashSet<Address>,
         // TODO: create a trait for this rather than using HashSet directly, b/c sometimes we want
         // to provide a HashMap with TxId keys instead of just a HashSet, and there's no built-in
         // subtyping for these types so it currently requires collecting all the keys into a set.
         completed: &HashSet<TxId>,
     ) -> LockEvent<S, E> {
         let event = match message {
-            Message::Lock {
-                txid,
-                kind,
-                predecessors,
-            } => {
+            Message::Lock { txid, kind } => {
                 let Entry::Vacant(e) = self.queue.entry(txid.clone()) else {
                     panic!("lock was double-requested")
                 };
 
-                if predecessors.is_empty() && !inputs.is_empty() {
-                    ctx.send(
-                        &txid.address,
-                        Message::LockRejected {
-                            txid: txid.clone(),
-                            needs_predecessors_from_inputs: inputs.clone(),
-                        },
-                    );
-
-                    return LockEvent::Rejected { txid, kind };
-                }
-
-                e.insert(QueuedLock { kind, predecessors });
+                e.insert(QueuedLock { kind });
 
                 LockEvent::Queued { txid, kind }
             }
@@ -183,19 +162,20 @@ where
             _ => LockEvent::Unhandled(message),
         };
 
-        self.process_queue(ctx, completed);
+        self.process_queue(ctx, completed, ancestor_vars);
 
         event
     }
 
-    fn process_queue(&mut self, ctx: &Context, completed: &HashSet<TxId>) {
+    fn process_queue(
+        &mut self,
+        ctx: &Context,
+        completed: &HashSet<TxId>,
+        ancestor_vars: &HashSet<Address>,
+    ) {
         let mut granted = Vec::new();
 
         for (txid, queued_lock) in self.queue.iter() {
-            if !queued_lock.predecessors.is_subset(completed) {
-                continue;
-            }
-
             match &mut self.held {
                 // if no locks are held, we can grant this queued lock unconditionally
                 held @ HeldLocks::None => match queued_lock.kind {
@@ -248,7 +228,9 @@ where
                 &txid.address,
                 Message::LockGranted {
                     txid: txid.clone(),
-                    predecessors: completed.clone(),
+                    address: ctx.me().clone(),
+                    completed: completed.clone(),
+                    ancestor_vars: ancestor_vars.clone(),
                 },
             );
         }

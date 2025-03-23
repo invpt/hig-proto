@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    f32::consts::PI,
     mem,
 };
 
@@ -21,7 +20,7 @@ use crate::{
 pub struct Manager {
     timestamp_generator: MonotonicTimestampGenerator,
     node_inputs: HashMap<Address, HashSet<Address>>,
-    transactions: HashMap<TxId, Option<Transaction>>,
+    transactions: HashMap<TxId, Transaction>,
     directory: Directory,
 }
 
@@ -30,6 +29,7 @@ struct Transaction {
     kind: TransactionKind,
     may_write: HashSet<Address>,
     predecessors: HashMap<TxId, TxMeta>,
+    pending_locks: HashSet<Address>,
     locks: HashMap<Address, Lock>,
 }
 
@@ -39,39 +39,20 @@ enum TransactionKind {
 }
 
 struct Lock {
-    address: Address,
-    kind: LockKind,
     value: LockValue,
-    state: LockState,
     did_write: bool,
+    completed: HashSet<TxId>,
+    ancestor_vars: HashSet<Address>,
 }
 
 enum LockValue {
     None(ReadRequest),
-    Some(Value, WriteRequest),
+    Some(Value),
 }
 
 enum ReadRequest {
     None,
-    Unsent,
     Pending,
-}
-
-enum WriteRequest {
-    None,
-    Unsent,
-}
-
-enum Request {
-    None,
-    Read,
-    Write(Value),
-}
-
-enum LockState {
-    Pending,
-    Requested,
-    Held(HashSet<TxId>),
 }
 
 impl Manager {
@@ -91,17 +72,18 @@ impl Manager {
             address: ctx.me().clone(),
         };
 
-        let tx = Transaction {
+        let mut tx = Transaction {
             id: txid.clone(),
             kind: TransactionKind::Action(action),
             may_write: HashSet::new(),
             predecessors: HashMap::new(),
+            pending_locks: HashSet::new(),
             locks: HashMap::new(),
         };
 
-        if let Some(tx) = tx.eval(self, ctx) {
-            self.transactions.insert(txid, Some(tx));
-        }
+        tx.eval(ctx);
+
+        self.transactions.insert(txid, tx);
     }
 }
 
@@ -118,65 +100,55 @@ impl Actor for Manager {
 
         match message {
             Message::Do { action } => self.do_action(action, &ctx),
-            Message::LockRejected {
+            Message::LockGranted {
                 txid,
-                needs_predecessors_from_inputs,
+                address,
+                completed,
+                ancestor_vars,
             } => {
-                self.node_inputs
-                    .insert(txid.address.clone(), needs_predecessors_from_inputs);
+                let tx = self.transactions.get_mut(&txid).unwrap();
 
-                let tx = self.transactions.get_mut(&txid).unwrap().as_mut().unwrap();
-
-                let lock = tx
-                    .locks
-                    .get_mut(&txid.address)
-                    .expect("received lock granted from unknown lock");
-
-                assert!(matches!(lock.state, LockState::Requested));
-
-                lock.state = LockState::Pending;
-            }
-            Message::LockGranted { txid, predecessors } => {
-                let mut tx = self.transactions.get_mut(&txid).unwrap().take().unwrap();
-
-                let lock = tx
-                    .locks
-                    .get_mut(&txid.address)
-                    .expect("received lock granted from unknown lock");
-
-                assert!(matches!(lock.state, LockState::Requested));
-
-                lock.state = LockState::Held(predecessors);
-
-                lock.send_request(&txid, &ctx);
-
-                if let Some(tx) = tx.eval(self, &ctx) {
-                    self.transactions.insert(txid, Some(tx));
+                if !tx.pending_locks.remove(&address) {
+                    panic!("we were granted a lock we did not request")
                 }
+
+                tx.locks.insert(
+                    address,
+                    Lock {
+                        value: LockValue::None(ReadRequest::None),
+                        did_write: false,
+                        completed,
+                        ancestor_vars,
+                    },
+                );
+
+                tx.eval(&ctx);
             }
             Message::ReadValue {
                 txid,
+                address,
                 value,
                 predecessors,
             } => {
-                let mut tx = self.transactions.get_mut(&txid).unwrap().take().unwrap();
+                let tx = self
+                    .transactions
+                    .get_mut(&txid)
+                    .expect("received message for unknown transaction");
 
                 let lock = tx
                     .locks
-                    .get_mut(&txid.address)
+                    .get_mut(&address)
                     .expect("received value from unknown lock");
 
                 assert!(matches!(lock.value, LockValue::None(ReadRequest::Pending)));
 
-                lock.value = LockValue::Some(value, WriteRequest::None);
+                lock.value = LockValue::Some(value);
 
                 for (txid, meta) in predecessors {
                     tx.predecessors.insert(txid, meta);
                 }
 
-                if let Some(tx) = tx.eval(self, &ctx) {
-                    self.transactions.insert(txid, Some(tx));
-                }
+                tx.eval(&ctx)
             }
             _ => todo!(),
         }
@@ -184,38 +156,31 @@ impl Actor for Manager {
 }
 
 impl Transaction {
-    pub fn eval(mut self, mgr: &mut Manager, ctx: &Context) -> Option<Self> {
+    pub fn eval(&mut self, ctx: &Context) {
         match &mut self.kind {
             TransactionKind::Action(action) => {
                 let mut action = mem::replace(action, Action::Nil);
                 self.may_write.clear();
-                action.traverse(&mut TransactionContext {
-                    tx: &mut self,
-                    mgr,
-                    ctx,
-                });
-                action.eval(&mut TransactionContext {
-                    tx: &mut self,
-                    mgr,
-                    ctx,
-                });
+                action.traverse(&mut TransactionContext { tx: self, ctx });
+                action.eval(&mut TransactionContext { tx: self, ctx });
+                self.kind = TransactionKind::Action(action);
 
-                if let Action::Nil = action {
+                /*if let Action::Nil = action {
                     // complete the txn
 
                     let affected = self
                         .locks
-                        .values()
-                        .filter(|l| l.did_write)
-                        .map(|l| l.address.clone())
+                        .iter()
+                        .filter(|(_, l)| l.did_write)
+                        .map(|(a, _)| a.clone())
                         .collect::<HashSet<_>>();
 
                     let mut predecessors = self.predecessors;
                     predecessors.insert(self.id.clone(), TxMeta { affected });
 
-                    for (_, lock) in self.locks {
+                    for (address, _) in self.locks {
                         ctx.send(
-                            &lock.address,
+                            &address,
                             Message::Release {
                                 txid: self.id.clone(),
                                 predecessors: predecessors.clone(),
@@ -228,170 +193,127 @@ impl Transaction {
                     self.kind = TransactionKind::Action(action);
 
                     Some(self)
-                }
+                }*/
             }
             TransactionKind::Upgrade(upgrade) => {
                 let mut upgrade = mem::replace(upgrade, Upgrade::Nil);
                 self.may_write.clear();
-                upgrade.traverse(&mut TransactionContext {
-                    tx: &mut self,
-                    mgr,
-                    ctx,
-                });
-                upgrade.eval(&mut TransactionContext {
-                    tx: &mut self,
-                    mgr,
-                    ctx,
-                });
+                upgrade.traverse(&mut TransactionContext { tx: self, ctx });
+                upgrade.eval(&mut TransactionContext { tx: self, ctx });
+                self.kind = TransactionKind::Upgrade(upgrade);
 
-                if let Upgrade::Nil = upgrade {
+                /*if let Upgrade::Nil = upgrade {
                     todo!()
                 } else {
                     todo!()
-                }
+                }*/
             }
         }
     }
 
-    fn lock(
-        &mut self,
-        address: &Address,
-        mut kind: LockKind,
-        request: Request,
-        mgr: &Manager,
-        ctx: &Context,
-    ) -> &Lock {
-        let lock = if self.locks.contains_key(address) {
-            let lock = self.locks.get_mut(address).unwrap();
+    fn lock(&mut self, address: &Address, mut kind: LockKind, ctx: &Context) -> Option<&mut Lock> {
+        if let Some(lock) = self.locks.get_mut(address) {
+            // already held
+            return Some(lock);
+        }
 
-            assert!(lock.kind >= kind, "cannot upgrade lock kinds");
-
-            lock
-        } else {
+        if self.pending_locks.insert(address.clone()) {
             if self.may_write.contains(address) {
-                // Even if a shared lock is requested, if we might at some point write this address,
-                // we need to conservatively get an exclusive lock
                 kind = LockKind::Exclusive;
             }
 
+            ctx.send(
+                address,
+                Message::Lock {
+                    txid: self.id.clone(),
+                    kind,
+                },
+            );
+        }
+
+        None
+    }
+
+    fn write(&mut self, address: &Address, value: &Value, ctx: &Context) -> bool {
+        let Some(lock) = self.lock(address, LockKind::Exclusive, ctx) else {
+            // cannot perform this write until the variable is locked
+            return false;
+        };
+
+        if let LockValue::None(ReadRequest::Pending) = &lock.value {
+            // cannot perform this write until we have gotten the value back
+            return false;
+        }
+
+        lock.value = LockValue::Some(value.clone());
+
+        ctx.send(
+            address,
+            Message::Write {
+                txid: self.id.clone(),
+                value: value.clone(),
+            },
+        );
+
+        true
+    }
+
+    fn read(&mut self, address: &Address, ctx: &Context) -> Option<&Value> {
+        let Some(lock) = self.lock(address, LockKind::Shared, ctx) else {
+            // cannot perform this read until the variable is locked
+            return None;
+        };
+
+        if let LockValue::Some(_value_that_is_exactly_what_we_need) = &lock.value {
+            // can't use _value_that_is_exactly_what_we_need because rust is dumb without Polonius
+            // this incantation grabs a fresh reference exactly equal to _value_that_is_exactly_what_we_need...
+            let LockValue::Some(value) = &self.locks.get(address).unwrap().value else {
+                unreachable!()
+            };
+
+            // we already have a value
+            return Some(value);
+        }
+
+        if let LockValue::None(ReadRequest::None) = &lock.value {
             let mut predecessors = HashSet::new();
-            let mut all_held = true;
-            for input in mgr
-                .node_inputs
-                .get(address)
-                .iter()
-                .flat_map(|inputs| inputs.iter())
-            {
-                if let LockState::Held(node_predecessors) =
-                    &self.lock(input, kind, Request::None, mgr, ctx).state
-                {
-                    for pred in node_predecessors {
-                        predecessors.insert(pred.clone());
-                    }
-                } else {
-                    all_held = false;
-                    break;
+            for ancestor_address in lock.ancestor_vars.clone() {
+                let Some(lock) = self.lock(&ancestor_address, LockKind::Shared, ctx) else {
+                    // cannot perform this read until this ancestor is locked
+                    return None;
+                };
+
+                for txid in &lock.completed {
+                    predecessors.insert(txid.clone());
                 }
             }
 
-            if all_held {
-                ctx.send(
-                    address,
-                    Message::Lock {
-                        txid: self.id.clone(),
-                        kind,
-                        predecessors,
-                    },
-                );
-            }
-
-            self.locks.insert(
-                address.clone(),
-                Lock {
-                    address: address.clone(),
-                    kind,
-                    value: LockValue::None(ReadRequest::None),
-                    state: if all_held {
-                        LockState::Requested
-                    } else {
-                        LockState::Pending
-                    },
-                    did_write: false,
+            ctx.send(
+                address,
+                Message::Read {
+                    txid: self.id.clone(),
+                    predecessors,
                 },
             );
 
-            self.locks.get_mut(address).unwrap()
-        };
-
-        match request {
-            Request::None => {}
-            Request::Read => {
-                if let LockValue::None(slot @ ReadRequest::None) = &mut lock.value {
-                    *slot = ReadRequest::Unsent;
-                }
-            }
-            Request::Write(value) => {
-                assert_eq!(
-                    kind,
-                    LockKind::Exclusive,
-                    "When a write is requested, the lock kind must be Exclusive"
-                );
-
-                lock.value = LockValue::Some(value, WriteRequest::Unsent);
-            }
+            self.locks.get_mut(address).unwrap().value = LockValue::None(ReadRequest::Pending);
         }
 
-        if let LockState::Held(_) = &lock.state {
-            lock.send_request(&self.id, ctx);
-        }
-
-        lock
-    }
-}
-
-impl Lock {
-    pub fn send_request(&mut self, txid: &TxId, ctx: &Context) {
-        assert!(
-            matches!(self.state, LockState::Held(_)),
-            "lock must be held to send its request"
-        );
-
-        match &mut self.value {
-            LockValue::None(slot @ ReadRequest::Unsent) => {
-                ctx.send(&self.address, Message::Read { txid: txid.clone() });
-                *slot = ReadRequest::Pending;
-            }
-            LockValue::None(ReadRequest::None | ReadRequest::Pending) => {}
-            LockValue::Some(value, slot @ WriteRequest::Unsent) => {
-                ctx.send(
-                    &self.address,
-                    Message::Write {
-                        txid: txid.clone(),
-                        value: value.clone(),
-                    },
-                );
-
-                *slot = WriteRequest::None;
-
-                self.did_write = true;
-            }
-            LockValue::Some(_, WriteRequest::None) => {}
-        }
+        None
     }
 }
 
 struct TransactionContext<'a, 'c> {
     tx: &'a mut Transaction,
-    mgr: &'a Manager,
     ctx: &'a Context<'c>,
 }
 
 impl<'a, 'c> UpgradeEvalContext for TransactionContext<'a, 'c> {
-    fn var(&mut self, name: Name, value: Value) {
+    fn var(&mut self, name: Name, replace: Option<Address>, value: Value) {
         todo!()
     }
 
-    fn def(&mut self, name: Name, expr: Expr) {
+    fn def(&mut self, name: Name, replace: Option<Address>, expr: Expr) {
         todo!()
     }
 
@@ -401,11 +323,11 @@ impl<'a, 'c> UpgradeEvalContext for TransactionContext<'a, 'c> {
 }
 
 impl<'a, 'c> UpgradeTraversalContext for TransactionContext<'a, 'c> {
-    fn will_var(&mut self, name: Name) {
+    fn will_var(&mut self, name: Name, replace: Option<Address>) {
         todo!()
     }
 
-    fn will_def(&mut self, name: Name) {
+    fn will_def(&mut self, name: Name, replace: Option<Address>) {
         todo!()
     }
 
@@ -415,21 +337,14 @@ impl<'a, 'c> UpgradeTraversalContext for TransactionContext<'a, 'c> {
 }
 
 impl<'a, 'c> ActionEvalContext for TransactionContext<'a, 'c> {
-    fn write(&mut self, address: &Address, value: Value) {
-        self.tx.lock(
-            address,
-            LockKind::Exclusive,
-            Request::Write(value),
-            &self.mgr,
-            self.ctx,
-        );
+    fn write(&mut self, address: &Address, value: &Value) -> bool {
+        self.tx.write(address, value, self.ctx)
     }
 }
 
 impl<'a, 'c> ActionTraversalContext for TransactionContext<'a, 'c> {
     fn will_write(&mut self, address: &Address) {
-        // TODO: request some locks in advance?
-        self.tx.may_write.insert(address.clone());
+        self.tx.lock(address, LockKind::Exclusive, self.ctx);
     }
 
     fn may_write(&mut self, address: &Address) {
@@ -438,19 +353,8 @@ impl<'a, 'c> ActionTraversalContext for TransactionContext<'a, 'c> {
 }
 
 impl<'a, 'c> ExprEvalContext for TransactionContext<'a, 'c> {
-    fn read(&mut self, address: &Address) -> Option<Value> {
-        let lock = self.tx.lock(
-            address,
-            LockKind::Shared,
-            Request::Read,
-            &self.mgr,
-            self.ctx,
-        );
-
-        match &lock.value {
-            LockValue::None(_) => None,
-            LockValue::Some(value, _) => Some(value.clone()),
-        }
+    fn read(&mut self, address: &Address) -> Option<&Value> {
+        self.tx.read(address, self.ctx)
     }
 }
 

@@ -37,7 +37,6 @@ impl Actor for Variable {
             ) {
                 LockEvent::Unhandled(message) => break 'unhandled message,
                 LockEvent::Queued { .. } => (),
-                LockEvent::Rejected { .. } => (),
                 LockEvent::Aborted { .. } => (),
                 LockEvent::Released {
                     data, predecessors, ..
@@ -91,15 +90,20 @@ impl Actor for Variable {
 
                 state.subscription_updates.push((subscriber, subscribe));
             }
-            Message::Read { txid } => {
+            Message::Read { txid, predecessors } => {
                 if self.lock.shared_lock(&txid).is_none() {
                     panic!("requested read without shared lock")
+                }
+
+                if !predecessors.is_empty() {
+                    panic!("cannot read variable with predecessors")
                 }
 
                 ctx.send(
                     &txid.address,
                     Message::ReadValue {
                         txid: txid.clone(),
+                        address: ctx.me().clone(),
                         value: self.value.clone(),
                         predecessors: self.applied_transactions.clone(),
                     },

@@ -1,9 +1,11 @@
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::collections::{hash_map::Entry, HashMap};
 
 use crate::{
     actor::{Address, Context},
     expr::Name,
-    message::{DirectoryEntry, DirectoryState, Message, TxId},
+    message::{
+        DirectoryEntryState, DirectoryState, EntryId, Message, MonotonicTimestampGenerator, TxId,
+    },
 };
 
 pub struct Directory {
@@ -76,16 +78,16 @@ impl Directory {
                             Entry::Occupied(mut entry) => {
                                 let old_node = entry.get_mut();
                                 match (new_node, old_node) {
-                                    (_, DirectoryEntry::Deleted) => {}
-                                    (DirectoryEntry::Deleted, current) => {
-                                        *current = DirectoryEntry::Deleted
+                                    (_, DirectoryEntryState::Deleted) => {}
+                                    (DirectoryEntryState::Deleted, current) => {
+                                        *current = DirectoryEntryState::Deleted
                                     }
                                     (
-                                        DirectoryEntry::Exists {
+                                        DirectoryEntryState::Existing {
                                             iteration: new_iteration,
                                             address: new_address,
                                         },
-                                        DirectoryEntry::Exists { iteration, address },
+                                        DirectoryEntryState::Existing { iteration, address },
                                     ) => {
                                         if new_iteration > *iteration {
                                             *iteration = new_iteration;
@@ -110,17 +112,68 @@ impl Directory {
         }
     }
 
-    pub fn register(&mut self, name: Name, address: Address, txid: TxId, ctx: &Context) {
-        todo!();
-        /*self.state.nodes.insert(
-            name,
-            DirectoryEntry {
-                txid,
-                address,
-                deleted: false,
-            },
-        );*/
+    pub fn get<'a: 'b, 'b>(
+        &'a self,
+        name: &'b Name,
+    ) -> impl Iterator<Item = (&'b EntryId, &'b Address)> {
+        self.state.nodes.get(name).into_iter().flat_map(|entries| {
+            entries.iter().flat_map(|(id, entry)| {
+                if let DirectoryEntryState::Existing { address, .. } = entry {
+                    Some((id, address))
+                } else {
+                    None
+                }
+            })
+        })
+    }
 
+    pub fn create(&mut self, name: Name, address: Address, txid: TxId, ctx: &Context) {
+        let entries = self
+            .state
+            .nodes
+            .entry(name)
+            .or_insert_with(|| HashMap::new());
+
+        if entries
+            .iter()
+            .all(|(_, entry)| matches!(entry, DirectoryEntryState::Deleted))
+        {
+            entries.insert(
+                EntryId { txid },
+                DirectoryEntryState::Existing {
+                    iteration: 0,
+                    address,
+                },
+            );
+        } else {
+            panic!("there is already an entry for the given name")
+        }
+
+        self.disseminate_state(ctx);
+    }
+
+    pub fn update(&mut self, name: &Name, entry_id: &EntryId, new_address: Address, ctx: &Context) {
+        let entries = self
+            .state
+            .nodes
+            .get_mut(name)
+            .expect("can not update name: no existing mappings");
+
+        let entry = entries
+            .get_mut(entry_id)
+            .expect("can not update name: could not find mapping");
+
+        let DirectoryEntryState::Existing { iteration, address } = entry else {
+            panic!("can not update name: mapping was deleted");
+        };
+
+        *iteration += 1;
+        *address = new_address;
+
+        self.disseminate_state(ctx);
+    }
+
+    fn disseminate_state(&self, ctx: &Context) {
         for (peer, removed) in &self.state.managers {
             if *removed || peer == ctx.me() {
                 continue;

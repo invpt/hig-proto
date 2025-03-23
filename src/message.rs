@@ -27,15 +27,12 @@ pub enum Message {
     Lock {
         txid: TxId,
         kind: LockKind,
-        predecessors: HashSet<TxId>,
-    },
-    LockRejected {
-        txid: TxId,
-        needs_predecessors_from_inputs: HashSet<Address>,
     },
     LockGranted {
         txid: TxId,
-        predecessors: HashSet<TxId>,
+        address: Address,
+        completed: HashSet<TxId>,
+        ancestor_vars: HashSet<Address>,
     },
 
     // mutation - messages available to shared and exclusive locks
@@ -46,9 +43,11 @@ pub enum Message {
     },
     Read {
         txid: TxId,
+        predecessors: HashSet<TxId>,
     },
     ReadValue {
         txid: TxId,
+        address: Address,
         value: Value,
         predecessors: HashMap<TxId, TxMeta>,
     },
@@ -89,12 +88,22 @@ pub enum Message {
 #[derive(Clone)]
 pub struct DirectoryState {
     pub managers: HashMap<Address, bool>,
-    pub nodes: HashMap<Name, HashMap<TxId, DirectoryEntry>>,
+
+    // Multi-value register semantics:
+    // If multiple nodes are assigned the same name concurrently, the directory will store all of them.
+    pub nodes: HashMap<Name, HashMap<EntryId, DirectoryEntryState>>,
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EntryId {
+    /// The transaction ID of the transaction that originally created this entry.
+    /// This is not updated when the entry is updated.
+    pub txid: TxId,
 }
 
 #[derive(Clone)]
-pub enum DirectoryEntry {
-    Exists { iteration: usize, address: Address },
+pub enum DirectoryEntryState {
+    Existing { iteration: usize, address: Address },
     Deleted,
 }
 
