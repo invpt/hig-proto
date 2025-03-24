@@ -1,12 +1,13 @@
 mod actor;
-mod definition;
+//mod definition;
 mod directory;
 mod expr;
-mod lock;
-mod manager;
+//mod lock;
+//mod manager;
 mod message;
+mod node;
 mod value;
-mod variable;
+//mod variable;
 
 fn main() {
     println!("Hello, world!");

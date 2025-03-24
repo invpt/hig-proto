@@ -295,9 +295,3 @@ impl<C> Resolver<Address> for C {
         Some(ident)
     }
 }
-
-impl ExprEvalContext for HashMap<Address, Value> {
-    fn read(&mut self, address: &Address) -> Option<&Value> {
-        self.get(address)
-    }
-}

@@ -5,8 +5,7 @@ use std::{
 
 use crate::{
     actor::{Address, Version},
-    definition::{self, InputMetadata},
-    expr::{Action, Expr, Name, Upgrade},
+    expr::{Action, Name, Upgrade},
     value::Value,
 };
 
@@ -32,7 +31,7 @@ pub enum Message {
     LockGranted {
         txid: TxId,
         address: Address,
-        completed: HashSet<TxId>,
+        completed: HashMap<TxId, TxMeta>,
         ancestor_vars: HashSet<Address>,
     },
 
@@ -57,10 +56,6 @@ pub enum Message {
     Write {
         txid: TxId,
         value: Value,
-    },
-    UpdateDefinitiion {
-        input_metadata: HashMap<Address, InputMetadata>,
-        expr: Expr,
     },
     UpdateVariable {
         value: Value,
