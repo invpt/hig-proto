@@ -4,8 +4,9 @@ use std::{
 };
 
 use crate::{
-    actor::Address,
-    expr::{Action, Name, Upgrade},
+    actor::{Address, Version},
+    definition::{self, InputMetadata},
+    expr::{Action, Expr, Name, Upgrade},
     value::Value,
 };
 
@@ -35,7 +36,7 @@ pub enum Message {
         ancestor_vars: HashSet<Address>,
     },
 
-    // mutation - messages available to shared and exclusive locks
+    // transaction - messages available to shared and exclusive locks
     SubscriptionUpdate {
         txid: TxId,
         subscriber: Address,
@@ -52,9 +53,16 @@ pub enum Message {
         predecessors: HashMap<TxId, TxMeta>,
     },
 
-    // mutation - messages available to exclusive locks
+    // transaction - messages available to exclusive locks
     Write {
         txid: TxId,
+        value: Value,
+    },
+    UpdateDefinitiion {
+        input_metadata: HashMap<Address, InputMetadata>,
+        expr: Expr,
+    },
+    UpdateVariable {
         value: Value,
     },
     Retire {
@@ -91,20 +99,7 @@ pub struct DirectoryState {
 
     // Multi-value register semantics:
     // If multiple nodes are assigned the same name concurrently, the directory will store all of them.
-    pub nodes: HashMap<Name, HashMap<EntryId, DirectoryEntryState>>,
-}
-
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EntryId {
-    /// The transaction ID of the transaction that originally created this entry.
-    /// This is not updated when the entry is updated.
-    pub txid: TxId,
-}
-
-#[derive(Clone)]
-pub enum DirectoryEntryState {
-    Existing { iteration: usize, address: Address },
-    Deleted,
+    pub nodes: HashMap<Name, HashMap<Address, Option<Version>>>,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -1,11 +1,9 @@
 use std::collections::{hash_map::Entry, HashMap};
 
 use crate::{
-    actor::{Address, Context},
+    actor::{Address, Context, VersionedAddress},
     expr::Name,
-    message::{
-        DirectoryEntryState, DirectoryState, EntryId, Message, MonotonicTimestampGenerator, TxId,
-    },
+    message::{DirectoryState, Message},
 };
 
 pub struct Directory {
@@ -50,7 +48,6 @@ impl Directory {
                     entry.insert(deleted);
 
                     if !deleted {
-                        // for each non-deleted new peer, send an introduction
                         new_peers.push(peer);
                     }
                 }
@@ -63,35 +60,26 @@ impl Directory {
             }
         }
 
-        for (name, new_nodes) in new_state.nodes {
+        for (name, addresses) in new_state.nodes {
             match self.state.nodes.entry(name.clone()) {
                 Entry::Vacant(entry) => {
-                    entry.insert(new_nodes);
+                    entry.insert(addresses);
                 }
                 Entry::Occupied(mut entry) => {
-                    let old_nodes = entry.get_mut();
-                    for (txid, new_node) in new_nodes {
-                        match old_nodes.entry(txid.clone()) {
+                    let my_addresses = entry.get_mut();
+                    for (address, version) in addresses {
+                        match my_addresses.entry(address.clone()) {
                             Entry::Vacant(entry) => {
-                                entry.insert(new_node);
+                                entry.insert(version);
                             }
                             Entry::Occupied(mut entry) => {
-                                let old_node = entry.get_mut();
-                                match (new_node, old_node) {
-                                    (_, DirectoryEntryState::Deleted) => {}
-                                    (DirectoryEntryState::Deleted, current) => {
-                                        *current = DirectoryEntryState::Deleted
-                                    }
-                                    (
-                                        DirectoryEntryState::Existing {
-                                            iteration: new_iteration,
-                                            address: new_address,
-                                        },
-                                        DirectoryEntryState::Existing { iteration, address },
-                                    ) => {
-                                        if new_iteration > *iteration {
-                                            *iteration = new_iteration;
-                                            *address = new_address;
+                                let my_version = entry.get_mut();
+                                match (version, my_version) {
+                                    (_, None) => (),
+                                    (None, my_version) => *my_version = None,
+                                    (Some(version), Some(my_version)) => {
+                                        if version > *my_version {
+                                            *my_version = version;
                                         }
                                     }
                                 }
@@ -112,14 +100,14 @@ impl Directory {
         }
     }
 
-    pub fn get<'a: 'b, 'b>(
-        &'a self,
-        name: &'b Name,
-    ) -> impl Iterator<Item = (&'b EntryId, &'b Address)> {
+    pub fn get<'a>(&'a self, name: &Name) -> impl Iterator<Item = VersionedAddress> + 'a {
         self.state.nodes.get(name).into_iter().flat_map(|entries| {
-            entries.iter().flat_map(|(id, entry)| {
-                if let DirectoryEntryState::Existing { address, .. } = entry {
-                    Some((id, address))
+            entries.iter().flat_map(|(address, version)| {
+                if let Some(version) = version {
+                    Some(VersionedAddress {
+                        address: address.clone(),
+                        version: version.clone(),
+                    })
                 } else {
                     None
                 }
@@ -127,48 +115,28 @@ impl Directory {
         })
     }
 
-    pub fn create(&mut self, name: Name, address: Address, txid: TxId, ctx: &Context) {
-        let entries = self
+    pub fn register(&mut self, name: Name, address: VersionedAddress, ctx: &Context) {
+        match self
             .state
             .nodes
             .entry(name)
-            .or_insert_with(|| HashMap::new());
-
-        if entries
-            .iter()
-            .all(|(_, entry)| matches!(entry, DirectoryEntryState::Deleted))
+            .or_insert_with(|| HashMap::new())
+            .entry(address.address)
         {
-            entries.insert(
-                EntryId { txid },
-                DirectoryEntryState::Existing {
-                    iteration: 0,
-                    address,
-                },
-            );
-        } else {
-            panic!("there is already an entry for the given name")
+            Entry::Vacant(entry) => {
+                entry.insert(Some(address.version));
+            }
+            Entry::Occupied(mut entry) => match entry.get_mut() {
+                None => *entry.get_mut() = Some(address.version),
+                Some(version) => {
+                    if address.version > *version {
+                        *version = address.version;
+                    } else {
+                        panic!("only new versions can be registered")
+                    }
+                }
+            },
         }
-
-        self.disseminate_state(ctx);
-    }
-
-    pub fn update(&mut self, name: &Name, entry_id: &EntryId, new_address: Address, ctx: &Context) {
-        let entries = self
-            .state
-            .nodes
-            .get_mut(name)
-            .expect("can not update name: no existing mappings");
-
-        let entry = entries
-            .get_mut(entry_id)
-            .expect("can not update name: could not find mapping");
-
-        let DirectoryEntryState::Existing { iteration, address } = entry else {
-            panic!("can not update name: mapping was deleted");
-        };
-
-        *iteration += 1;
-        *address = new_address;
 
         self.disseminate_state(ctx);
     }

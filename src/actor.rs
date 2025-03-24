@@ -35,6 +35,22 @@ pub struct Address {
     index: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VersionedAddress {
+    pub address: Address,
+    pub version: Version,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Version(usize);
+
+impl Version {
+    #[must_use]
+    pub fn increment(self) -> Version {
+        Version(self.0 + 1)
+    }
+}
+
 impl System {
     pub fn new() -> System {
         System {

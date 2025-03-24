@@ -29,6 +29,7 @@ struct PendingTransaction {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct ReceivedUpdateId(usize);
 
+#[derive(Clone)]
 pub struct InputMetadata {
     pub ancestor_variables: Box<[Address]>,
     pub current_value: Value,

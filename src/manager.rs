@@ -72,7 +72,7 @@ impl Manager {
             address: ctx.me().clone(),
         };
 
-        let mut tx = Transaction {
+        let tx = Transaction {
             id: txid.clone(),
             kind: TransactionKind::Action(action),
             may_write: HashSet::new(),
@@ -81,9 +81,43 @@ impl Manager {
             locks: HashMap::new(),
         };
 
+        self.transactions.insert(txid.clone(), tx);
+
+        self.eval(&txid, ctx);
+    }
+
+    fn eval(&mut self, txid: &TxId, ctx: &Context) {
+        let tx = self.transactions.get_mut(txid).unwrap();
         tx.eval(ctx);
 
-        self.transactions.insert(txid, tx);
+        match tx.kind {
+            TransactionKind::Action(Action::Nil) => {
+                let tx = self.transactions.remove(txid).unwrap();
+                let affected = tx
+                    .locks
+                    .iter()
+                    .filter(|(_, l)| l.did_write)
+                    .map(|(a, _)| a.clone())
+                    .collect::<HashSet<_>>();
+
+                let mut predecessors = tx.predecessors;
+                predecessors.insert(tx.id.clone(), TxMeta { affected });
+
+                for (address, _) in tx.locks {
+                    ctx.send(
+                        &address,
+                        Message::Release {
+                            txid: tx.id.clone(),
+                            predecessors: predecessors.clone(),
+                        },
+                    );
+                }
+            }
+            TransactionKind::Upgrade(Upgrade::Nil) => {
+                let tx = self.transactions.remove(txid).unwrap();
+            }
+            _ => (),
+        }
     }
 }
 
@@ -122,7 +156,7 @@ impl Actor for Manager {
                     },
                 );
 
-                tx.eval(&ctx);
+                self.eval(&txid, &ctx);
             }
             Message::ReadValue {
                 txid,
@@ -148,7 +182,7 @@ impl Actor for Manager {
                     tx.predecessors.insert(txid, meta);
                 }
 
-                tx.eval(&ctx)
+                self.eval(&txid, &ctx);
             }
             _ => todo!(),
         }
