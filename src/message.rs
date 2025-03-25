@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     actor::{Address, Version},
-    expr::{Action, Name, Upgrade},
+    expr::{Action, Expr, Name, Upgrade},
     value::Value,
 };
 
@@ -17,13 +17,13 @@ pub enum Message {
     },
 
     // propagation
-    Update {
+    Propagate {
         sender: Address,
         value: Value,
         predecessors: HashMap<TxId, TxMeta>,
     },
 
-    // mutation - initial lock request
+    // transaction - initial lock request
     Lock {
         txid: TxId,
         kind: LockKind,
@@ -36,35 +36,35 @@ pub enum Message {
     },
 
     // transaction - messages available to shared and exclusive locks
-    SubscriptionUpdate {
-        txid: TxId,
-        subscriber: Address,
-        subscribe: bool,
-    },
-    Read {
+    ReadValue {
         txid: TxId,
         predecessors: HashSet<TxId>,
     },
-    ReadValue {
+    ReadValueResult {
         txid: TxId,
         address: Address,
         value: Value,
         predecessors: HashMap<TxId, TxMeta>,
     },
+    UpdateSubscriptions {
+        txid: TxId,
+        changes: HashMap<Address, bool>,
+    },
 
     // transaction - messages available to exclusive locks
-    Write {
+    WriteValue {
         txid: TxId,
         value: Value,
     },
-    UpdateVariable {
-        value: Value,
+    UpdateConfiguration {
+        txid: TxId,
+        configuration: ConfigurationUpdate,
     },
     Retire {
         txid: TxId,
     },
 
-    // mutation - messages related to ending the lock
+    // transaction - messages related to ending the lock
     Preempt {
         txid: TxId,
     },
@@ -89,6 +89,23 @@ pub enum Message {
 }
 
 #[derive(Clone)]
+pub struct InputMetadata {
+    pub entries: HashMap<Address, InputMetadataEntry>,
+}
+
+#[derive(Clone)]
+pub struct InputMetadataEntry {
+    pub ancestor_variables: HashSet<Address>,
+    pub current_value: Value,
+}
+
+#[derive(Clone)]
+pub enum ConfigurationUpdate {
+    Variable { value: Value },
+    Definition { inputs: InputMetadata, expr: Expr },
+}
+
+#[derive(Clone)]
 pub struct DirectoryState {
     pub managers: HashMap<Address, bool>,
 
@@ -97,20 +114,20 @@ pub struct DirectoryState {
     pub nodes: HashMap<Name, HashMap<Address, Option<Version>>>,
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TxId {
-    pub kind: TxKind,
+    pub priority: TxPriority,
     pub timestamp: Timestamp,
     pub address: Address,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum TxKind {
-    Code = 0,
-    Data = 1,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TxPriority {
+    High = 0,
+    Low = 1,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timestamp {
     epoch_micros: u64,
 }
@@ -146,12 +163,12 @@ impl MonotonicTimestampGenerator {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxMeta {
     pub affected: HashSet<Address>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LockKind {
     Shared = 0,
     Exclusive = 1,
