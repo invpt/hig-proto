@@ -49,6 +49,62 @@ enum HeldLocks {
     Exclusive(TxId, SubscriptionUpdates, CodeUpdates),
 }
 
+impl HeldLocks {
+    fn exclusive(&self, txid: &TxId) -> Option<&CodeUpdates> {
+        match self {
+            HeldLocks::Exclusive(held_txid, _, exclusive_data) => {
+                if held_txid == txid {
+                    Some(exclusive_data)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn exclusive_mut(&mut self, txid: &TxId) -> Option<&mut CodeUpdates> {
+        match self {
+            HeldLocks::Exclusive(held_txid, _, exclusive_data) => {
+                if held_txid == txid {
+                    Some(exclusive_data)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn shared(&self, txid: &TxId) -> Option<&SubscriptionUpdates> {
+        match self {
+            HeldLocks::Shared(held) => held.get(txid),
+            HeldLocks::Exclusive(held_txid, shared_data, _) => {
+                if held_txid == txid {
+                    Some(shared_data)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn shared_mut(&mut self, txid: &TxId) -> Option<&mut SubscriptionUpdates> {
+        match self {
+            HeldLocks::Shared(held) => held.get_mut(txid),
+            HeldLocks::Exclusive(held_txid, shared_data, _) => {
+                if held_txid == txid {
+                    Some(shared_data)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
 type SubscriptionUpdates = Vec<(Address, bool)>;
 
 enum CodeUpdates {
@@ -58,13 +114,13 @@ enum CodeUpdates {
 }
 
 impl Node {
-    fn handle_lock_released(
+    fn handle_lock_released<'a>(
         &mut self,
         predecessors: HashMap<TxId, TxMeta>,
         subscription_updates: SubscriptionUpdates,
         code_updates: CodeUpdates,
-        ctx: Context,
-    ) {
+        ctx: Context<'a>,
+    ) -> Option<Context<'a>> {
         for (subscriber, subscribe) in subscription_updates {
             if subscribe {
                 self.subscribers.insert(subscriber);
@@ -74,8 +130,11 @@ impl Node {
         }
 
         match code_updates {
-            CodeUpdates::None => {}
-            CodeUpdates::Retire => ctx.retire(),
+            CodeUpdates::None => Some(ctx),
+            CodeUpdates::Retire => {
+                ctx.retire();
+                None
+            }
             CodeUpdates::Update(expr, inputs) => {
                 self.expr = expr;
                 self.inputs = inputs;
@@ -111,6 +170,8 @@ impl Node {
                 for address in &self.subscribers {
                     ctx.send(&address, message.clone());
                 }
+
+                Some(ctx)
             }
         }
     }
@@ -205,7 +266,7 @@ impl Node {
 }
 
 impl Actor for Node {
-    fn handle(&mut self, message: Message, ctx: Context) {
+    fn handle(&mut self, message: Message, mut ctx: Context) {
         match message {
             Message::Lock { txid, kind } => {
                 let btree_map::Entry::Vacant(e) = self.queue.entry(txid.clone()) else {
@@ -213,30 +274,37 @@ impl Actor for Node {
                 };
 
                 e.insert(kind);
+
+                self.process_queue(&ctx);
             }
-            Message::Abort { txid } => match std::mem::replace(&mut self.held, HeldLocks::None) {
-                HeldLocks::None => panic!("abort of unheld lock requested"),
-                HeldLocks::Shared(mut held) => {
-                    let data = held.remove(&txid);
+            Message::Abort { txid } => {
+                match std::mem::replace(&mut self.held, HeldLocks::None) {
+                    HeldLocks::None => panic!("abort of unheld lock requested"),
+                    HeldLocks::Shared(mut held) => {
+                        let data = held.remove(&txid);
 
-                    if held.len() != 0 {
-                        // restore the remaining held shared locks
-                        self.held = HeldLocks::Shared(held);
+                        if held.len() != 0 {
+                            // restore the remaining held shared locks
+                            self.held = HeldLocks::Shared(held);
+                        }
+
+                        if data.is_none() {
+                            panic!("abort of unheld lock requested")
+                        }
                     }
+                    HeldLocks::Exclusive(held_txid, shared_data, exclusive_data) => {
+                        if held_txid != txid {
+                            // restore the unmatched exclusive lock
+                            self.held =
+                                HeldLocks::Exclusive(held_txid, shared_data, exclusive_data);
 
-                    if data.is_none() {
-                        panic!("abort of unheld lock requested")
+                            panic!("abort of unheld lock requested")
+                        }
                     }
                 }
-                HeldLocks::Exclusive(held_txid, shared_data, exclusive_data) => {
-                    if held_txid != txid {
-                        // restore the unmatched exclusive lock
-                        self.held = HeldLocks::Exclusive(held_txid, shared_data, exclusive_data);
 
-                        panic!("abort of unheld lock requested")
-                    }
-                }
-            },
+                self.process_queue(&ctx);
+            }
             Message::Release { txid, predecessors } => {
                 match std::mem::replace(&mut self.held, HeldLocks::None) {
                     HeldLocks::None => panic!("release of unheld lock requested"),
@@ -249,19 +317,32 @@ impl Actor for Node {
                         }
 
                         if let Some(data) = data {
-                            self.handle_lock_released(predecessors, data, CodeUpdates::None, ctx);
+                            if let Some(returned) = self.handle_lock_released(
+                                predecessors,
+                                data,
+                                CodeUpdates::None,
+                                ctx,
+                            ) {
+                                ctx = returned;
+                            } else {
+                                return;
+                            }
                         } else {
                             panic!("release of unheld lock requested")
                         }
                     }
                     HeldLocks::Exclusive(held_txid, shared_data, exclusive_data) => {
                         if held_txid == txid {
-                            self.handle_lock_released(
+                            if let Some(returned) = self.handle_lock_released(
                                 predecessors,
                                 shared_data,
                                 exclusive_data,
                                 ctx,
-                            );
+                            ) {
+                                ctx = returned;
+                            } else {
+                                return;
+                            }
                         } else {
                             // restore the unmatched exclusive lock
                             self.held =
@@ -271,6 +352,46 @@ impl Actor for Node {
                         }
                     }
                 }
+
+                self.process_queue(&ctx);
+            }
+            Message::SubscriptionUpdate {
+                txid,
+                subscriber,
+                subscribe,
+            } => {
+                let Some(subscription_updates) = self.held.shared_mut(&txid) else {
+                    panic!("requested subscription update without shared lock")
+                };
+
+                subscription_updates.push((subscriber, subscribe));
+            }
+            Message::Read { txid, predecessors } => {
+                if self.held.shared(&txid).is_none() {
+                    panic!("requested read without shared lock")
+                }
+
+                if !predecessors.is_empty() {
+                    panic!("cannot read variable with predecessors")
+                }
+
+                let value = if let Some(cached_value) = &self.cached_value {
+                    cached_value
+                } else if let Expr::Value(value) = &self.expr {
+                    value
+                } else {
+                    panic!("node has no value")
+                };
+
+                ctx.send(
+                    &txid.address,
+                    Message::ReadValue {
+                        txid: txid.clone(),
+                        address: ctx.me().clone(),
+                        value: value.clone(),
+                        predecessors: self.applied_transactions.clone(),
+                    },
+                );
             }
             _ => todo!(),
         }
