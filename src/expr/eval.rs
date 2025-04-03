@@ -1,4 +1,4 @@
-use std::{collections::HashMap, mem};
+use std::mem;
 
 use crate::{actor::Address, value::Value};
 
@@ -11,7 +11,7 @@ pub trait UpgradeEvalContext: ActionEvalContext + Resolver<UpgradeIdent> {
 }
 
 pub trait ActionEvalContext: ExprEvalContext {
-    /// Writes to the node referenced by `address` with the given `value`.
+    /// Attempts to write to the node referenced by `address` with the given `value`.
     ///
     /// Returns true if the write was performed.
     fn write(&mut self, address: &Address, value: &Value) -> bool;
@@ -54,13 +54,13 @@ impl Upgrade {
                     panic!("var expr could not be fully evaluated")
                 }
             }
-            Upgrade::Def(_, _, expr) => {
-                let Some(expr) = (&*expr).resolve(ctx) else {
-                    panic!("def expr could not be fully resolved")
+            Upgrade::Def(..) => {
+                let Upgrade::Def(name, replace, expr) = mem::replace(self, Upgrade::Nil) else {
+                    unreachable!()
                 };
 
-                let Upgrade::Def(name, replace, _) = mem::replace(self, Upgrade::Nil) else {
-                    unreachable!()
+                let Some(expr) = expr.resolve(ctx) else {
+                    panic!("def expr could not be fully resolved")
                 };
 
                 ctx.def(name, replace, expr);
@@ -159,7 +159,7 @@ impl<Ident> Expr<Ident> {
         }
     }
 
-    fn resolve<C>(&self, ctx: &mut C) -> Option<Expr>
+    fn resolve<C>(self, ctx: &mut C) -> Option<Expr>
     where
         C: Resolver<Ident>,
     {
@@ -179,7 +179,20 @@ impl<Ident> Expr<Ident> {
                 Some(address) => Some(Expr::Read(address.clone())),
                 None => None,
             },
-            Expr::Value(value) => Some(Expr::Value(value.clone())),
+            Expr::Value(value) => Some(Expr::Value(value)),
+        }
+    }
+
+    /// Traverses the expression, calling the callback with each Ident the Expr might read from.
+    pub fn may_read(&self, mut cb: impl FnMut(&Ident)) {
+        match self {
+            Expr::Tuple(items) => {
+                for item in items {
+                    item.may_read(&mut cb);
+                }
+            }
+            Expr::Read(ident) => cb(ident),
+            Expr::Value(value) => (),
         }
     }
 }

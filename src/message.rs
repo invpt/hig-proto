@@ -1,5 +1,6 @@
 use std::{
-    collections::{HashMap, HashSet},
+    cmp::Ordering,
+    collections::{hash_map::Entry, HashMap, HashSet},
     time::SystemTime,
 };
 
@@ -19,8 +20,7 @@ pub enum Message {
     // propagation
     Propagate {
         sender: Address,
-        value: Value,
-        predecessors: HashMap<TxId, TxMeta>,
+        value: StampedValue,
     },
 
     // transaction - initial lock request
@@ -31,20 +31,19 @@ pub enum Message {
     LockGranted {
         txid: TxId,
         address: Address,
-        completed: HashMap<TxId, TxMeta>,
+        roots: BasisStamp,
         ancestor_vars: HashSet<Address>,
     },
 
     // transaction - messages available to shared and exclusive locks
-    ReadValue {
+    Read {
         txid: TxId,
-        predecessors: HashSet<TxId>,
+        roots: BasisStamp,
     },
-    ReadValueResult {
+    ReadResult {
         txid: TxId,
         address: Address,
         value: Value,
-        predecessors: HashMap<TxId, TxMeta>,
     },
     UpdateSubscriptions {
         txid: TxId,
@@ -52,13 +51,13 @@ pub enum Message {
     },
 
     // transaction - messages available to exclusive locks
-    WriteValue {
+    Write {
         txid: TxId,
         value: Value,
     },
-    UpdateConfiguration {
+    Reconfigure {
         txid: TxId,
-        configuration: ConfigurationUpdate,
+        configuration: NodeConfiguration,
     },
     Retire {
         txid: TxId,
@@ -73,7 +72,7 @@ pub enum Message {
     },
     Release {
         txid: TxId,
-        predecessors: HashMap<TxId, TxMeta>,
+        roots: BasisStamp,
     },
 
     // messages sent/received by managers
@@ -89,20 +88,88 @@ pub enum Message {
 }
 
 #[derive(Clone)]
-pub struct InputMetadata {
-    pub entries: HashMap<Address, InputMetadataEntry>,
+pub struct StampedValue {
+    pub value: Value,
+    pub basis: BasisStamp,
 }
 
 #[derive(Clone)]
-pub struct InputMetadataEntry {
-    pub ancestor_variables: HashSet<Address>,
-    pub current_value: Value,
+pub struct BasisStamp {
+    pub root_iterations: HashMap<Address, Iteration>,
+}
+
+impl BasisStamp {
+    pub fn empty() -> BasisStamp {
+        BasisStamp {
+            root_iterations: HashMap::new(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.root_iterations.is_empty()
+    }
+
+    pub fn latest(&self, address: &Address) -> Iteration {
+        self.root_iterations
+            .get(address)
+            .copied()
+            .unwrap_or(Iteration(0))
+    }
+
+    pub fn add(&mut self, address: Address, iteration: Iteration) {
+        let entry = self.root_iterations.entry(address).or_insert(iteration);
+        *entry = (*entry).max(iteration);
+    }
+
+    pub fn merge_from(&mut self, other: &BasisStamp) {
+        for (address, version) in &other.root_iterations {
+            match self.root_iterations.entry(address.clone()) {
+                Entry::Vacant(entry) => {
+                    entry.insert(*version);
+                }
+                Entry::Occupied(mut entry) => {
+                    *entry.get_mut() = (*entry.get()).max(*version);
+                }
+            }
+        }
+    }
+
+    pub fn prec_eq_wrt_roots(&self, other: &BasisStamp, roots: &HashSet<Address>) -> bool {
+        for root in roots {
+            if self.latest(root) > other.latest(root) {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Iteration(usize);
+
+impl Iteration {
+    #[must_use]
+    pub fn increment(self) -> Iteration {
+        Iteration(self.0 + 1)
+    }
 }
 
 #[derive(Clone)]
-pub enum ConfigurationUpdate {
-    Variable { value: Value },
-    Definition { inputs: InputMetadata, expr: Expr },
+pub enum NodeConfiguration {
+    Variable {
+        value: StampedValue,
+    },
+    Definition {
+        expr: Expr,
+        inputs: HashMap<Address, InputConfiguration>,
+    },
+}
+
+#[derive(Clone)]
+pub struct InputConfiguration {
+    pub roots: HashSet<Address>,
+    pub value: StampedValue,
 }
 
 #[derive(Clone)]
@@ -161,11 +228,6 @@ impl MonotonicTimestampGenerator {
 
         self.latest
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TxMeta {
-    pub affected: HashSet<Address>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
