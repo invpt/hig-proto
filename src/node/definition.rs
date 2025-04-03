@@ -1,19 +1,15 @@
-use std::{
-    collections::{hash_map::Entry, BTreeMap, HashMap, HashSet, VecDeque},
-    num::NonZeroUsize,
-};
+use std::collections::{HashMap, HashSet};
 
 use crate::{
     actor::Address,
     expr::{eval::ExprEvalContext, Expr},
-    message::{BasisStamp, InputConfiguration, Iteration, StampedValue, TxId},
+    message::{BasisStamp, InputConfiguration, StampedValue},
     value::Value,
 };
 
 pub struct Definition {
-    inputs: BTreeMap<Address, Input>,
+    inputs: HashMap<Address, Input>,
     expr: Expr,
-    counter: NonZeroUsize,
 }
 
 struct Input {
@@ -22,12 +18,12 @@ struct Input {
     updates: Vec<StampedValue>,
 }
 
-struct EvalContext<'a>(&'a BTreeMap<Address, Input>);
+struct EvalContext<'a>(&'a HashMap<Address, Input>);
 
 impl Definition {
     pub fn new(
         expr: Expr,
-        inputs: HashMap<Address, InputConfiguration>,
+        inputs: impl IntoIterator<Item = (Address, InputConfiguration)>,
     ) -> (Definition, StampedValue) {
         let definition = Definition {
             inputs: inputs
@@ -44,7 +40,6 @@ impl Definition {
                 })
                 .collect(),
             expr,
-            counter: NonZeroUsize::MIN,
         };
 
         let value = definition.compute();
@@ -55,10 +50,20 @@ impl Definition {
     pub fn reconfigure(
         &mut self,
         new_expr: Expr,
-        new_inputs: HashMap<Address, InputConfiguration>,
+        new_inputs: impl IntoIterator<Item = (Address, InputConfiguration)>,
     ) -> StampedValue {
-        /*self.expr = new_expr;
-        self.inputs.extend(new_inputs);
+        self.expr = new_expr;
+        self.inputs
+            .extend(new_inputs.into_iter().map(|(address, cfg)| {
+                (
+                    address,
+                    Input {
+                        roots: cfg.roots,
+                        value: cfg.value,
+                        updates: Vec::new(),
+                    },
+                )
+            }));
 
         let mut referenced_inputs = HashSet::new();
         self.expr.may_read(|address| {
@@ -68,12 +73,11 @@ impl Definition {
         self.inputs
             .retain(|address, _| referenced_inputs.contains(address));
 
-        self.compute()*/
-        todo!()
+        self.compute()
     }
 
     fn compute(&self) -> StampedValue {
-        /*let mut expr = self.expr.clone();
+        let mut expr = self.expr.clone();
         expr.eval(&mut EvalContext(&self.inputs));
         let Expr::Value(value) = expr else {
             panic!("expr did not fully evaluate")
@@ -81,17 +85,17 @@ impl Definition {
 
         StampedValue {
             value,
-            predecessors: self
-                .inputs
-                .values()
-                .flat_map(|input| input.value.predecessors.iter())
-                .map(|(txid, meta)| (txid.clone(), meta.clone()))
-                .collect(),
-        }*/
-        todo!()
+            basis: self.inputs.values().map(|input| &input.value.basis).fold(
+                BasisStamp::empty(),
+                |mut a, b| {
+                    a.merge_from(&b);
+                    a
+                },
+            ),
+        }
     }
 
-    pub fn ancestor_vars(&self) -> impl Iterator<Item = &Address> {
+    pub fn roots(&self) -> impl Iterator<Item = &Address> {
         self.inputs.values().flat_map(|i| i.roots.iter())
     }
 
@@ -106,6 +110,7 @@ impl Definition {
     pub fn find_and_apply_batch(&mut self) -> Option<StampedValue> {
         let mut found = None;
 
+        let mut explored = HashSet::new();
         'seeds: for seed in self.inputs.keys() {
             let mut inputs = self
                 .inputs
@@ -113,19 +118,19 @@ impl Definition {
                 .map(|(address, input)| {
                     (
                         address,
-                        RemainingInput {
+                        BatchInput {
                             roots: &input.roots,
                             basis: &input.value.basis,
                             // Don't include any updates if this is an input we've already con-
                             // sidered as a seed. Since it was considered already, we know there
                             // are definitely no valid batches available now that involve this
                             // input.
-                            remaining_updates: if *address >= *seed {
+                            remaining_updates: if explored.contains(address) {
                                 &*input.updates
                             } else {
                                 &[]
                             },
-                            update_count: if *address >= *seed {
+                            update_count: if explored.contains(address) {
                                 input.updates.len()
                             } else {
                                 0
@@ -133,10 +138,11 @@ impl Definition {
                         },
                     )
                 })
-                .collect::<BTreeMap<_, _>>();
+                .collect::<HashMap<_, _>>();
 
             let seed_input = inputs.get_mut(seed).unwrap();
             let Some((seed_update, rest)) = seed_input.remaining_updates.split_first() else {
+                explored.insert(seed.clone());
                 continue 'seeds;
             };
             seed_input.remaining_updates = rest;
@@ -152,6 +158,7 @@ impl Definition {
                             // We need an update from this input, but the input does not have an
                             // update to give us. That means there is no batch possible for the
                             // current seed.
+                            explored.insert(seed.clone());
                             continue 'seeds;
                         };
 
@@ -168,16 +175,12 @@ impl Definition {
             // Explanation: The number of updates we popped off the queue of each input.
             let update_counts = inputs
                 .into_iter()
-                .map(
-                    |(
-                        address,
-                        RemainingInput {
-                            remaining_updates: updates,
-                            update_count,
-                            ..
-                        },
-                    )| { (address.clone(), update_count - updates.len()) },
-                )
+                .map(|(address, input)| {
+                    (
+                        address.clone(),
+                        input.update_count - input.remaining_updates.len(),
+                    )
+                })
                 .collect::<Vec<_>>();
 
             found = Some((update_counts, basis));
@@ -195,8 +198,9 @@ impl Definition {
             if let Some(value) = input.updates.drain(0..update_count).last() {
                 input.value = value;
             } else {
-                // The basis we computed earlier only includes updated bases.
-                // Since this input was not updated, we can add the basis now.
+                // The basis we computed earlier only includes basis stamps from updated inputs.
+                // But we need to include the basis stamp from every input. Since this one was not
+                // updated, it has not been included yet, and so we need to add it.
                 basis.merge_from(&input.value.basis);
             }
         }
@@ -211,7 +215,7 @@ impl Definition {
     }
 }
 
-struct RemainingInput<'a> {
+struct BatchInput<'a> {
     roots: &'a HashSet<Address>,
     basis: &'a BasisStamp,
     remaining_updates: &'a [StampedValue],

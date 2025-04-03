@@ -31,14 +31,14 @@ pub enum Message {
     LockGranted {
         txid: TxId,
         address: Address,
-        roots: BasisStamp,
-        ancestor_vars: HashSet<Address>,
+        basis: BasisStamp,
+        roots: HashSet<Address>,
     },
 
     // transaction - messages available to shared and exclusive locks
     Read {
         txid: TxId,
-        roots: BasisStamp,
+        basis: BasisStamp,
     },
     ReadResult {
         txid: TxId,
@@ -72,7 +72,7 @@ pub enum Message {
     },
     Release {
         txid: TxId,
-        roots: BasisStamp,
+        basis: BasisStamp,
     },
 
     // messages sent/received by managers
@@ -117,20 +117,19 @@ impl BasisStamp {
     }
 
     pub fn add(&mut self, address: Address, iteration: Iteration) {
-        let entry = self.root_iterations.entry(address).or_insert(iteration);
-        *entry = (*entry).max(iteration);
+        match self.root_iterations.entry(address) {
+            Entry::Vacant(entry) => {
+                entry.insert(iteration);
+            }
+            Entry::Occupied(mut entry) => {
+                *entry.get_mut() = (*entry.get()).max(iteration);
+            }
+        }
     }
 
     pub fn merge_from(&mut self, other: &BasisStamp) {
-        for (address, version) in &other.root_iterations {
-            match self.root_iterations.entry(address.clone()) {
-                Entry::Vacant(entry) => {
-                    entry.insert(*version);
-                }
-                Entry::Occupied(mut entry) => {
-                    *entry.get_mut() = (*entry.get()).max(*version);
-                }
-            }
+        for (address, iteration) in &other.root_iterations {
+            self.add(address.clone(), *iteration);
         }
     }
 

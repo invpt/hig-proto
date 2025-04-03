@@ -163,10 +163,10 @@ impl Node {
             granted.push(txid.clone());
         }
 
-        let ancestor_vars = self
+        let roots = self
             .definition
             .iter()
-            .flat_map(|d| d.ancestor_vars())
+            .flat_map(|d| d.roots())
             .cloned()
             .collect::<HashSet<_>>();
 
@@ -177,8 +177,8 @@ impl Node {
                 Message::LockGranted {
                     txid: txid.clone(),
                     address: ctx.me().clone(),
-                    roots: self.value.basis.clone(),
-                    ancestor_vars: ancestor_vars.clone(),
+                    basis: self.value.basis.clone(),
+                    roots: roots.clone(),
                 },
             );
         }
@@ -243,7 +243,7 @@ impl Actor for Node {
 
                 self.grant_locks(&ctx);
             }
-            Message::Release { txid, roots } => {
+            Message::Release { txid, basis: roots } => {
                 match std::mem::replace(&mut self.held, HeldLocks::None) {
                     HeldLocks::None => panic!("release of unheld lock requested"),
                     HeldLocks::Shared(mut held) => {
@@ -294,7 +294,7 @@ impl Actor for Node {
 
                 shared_state.subscription_updates.extend(changes);
             }
-            Message::Read { txid, roots } => {
+            Message::Read { txid, basis: roots } => {
                 let Some(shared_state) = self.held.shared_mut(&txid) else {
                     panic!("requested read without shared lock")
                 };
