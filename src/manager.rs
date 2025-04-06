@@ -7,13 +7,10 @@ use crate::{
     actor::{Actor, Address, Context},
     directory::{Directory, DirectoryEvent},
     expr::{
-        eval::{
-            ActionEvalContext, ActionTraversalContext, ExprEvalContext, ExprTraversalContext,
-            Resolver, UpgradeEvalContext, UpgradeTraversalContext,
-        },
+        eval::{ActionEvalContext, ExprEvalContext, Resolver, UpgradeEvalContext},
         Action, Expr, Name, Upgrade, UpgradeIdent,
     },
-    message::{LockKind, Message, MonotonicTimestampGenerator, TxId, TxKind, TxMeta},
+    message::{BasisStamp, LockKind, Message, MonotonicTimestampGenerator, TxId, TxPriority},
     value::Value,
 };
 
@@ -28,7 +25,6 @@ struct Transaction {
     id: TxId,
     kind: TransactionKind,
     may_write: HashSet<Address>,
-    predecessors: HashMap<TxId, TxMeta>,
     pending_locks: HashSet<Address>,
     locks: HashMap<Address, Lock>,
 }
@@ -40,9 +36,9 @@ enum TransactionKind {
 
 struct Lock {
     value: LockValue,
-    did_write: bool,
-    completed: HashSet<TxId>,
-    ancestor_vars: HashSet<Address>,
+    wrote: bool,
+    basis: BasisStamp,
+    roots: HashSet<Address>,
 }
 
 enum LockValue {
@@ -67,7 +63,7 @@ impl Manager {
 
     fn do_action(&mut self, action: Action<Address>, ctx: &Context) {
         let txid = TxId {
-            kind: TxKind::Data,
+            priority: TxPriority::Low,
             timestamp: self.timestamp_generator.generate_timestamp(),
             address: ctx.me().clone(),
         };
@@ -76,7 +72,6 @@ impl Manager {
             id: txid.clone(),
             kind: TransactionKind::Action(action),
             may_write: HashSet::new(),
-            predecessors: HashMap::new(),
             pending_locks: HashSet::new(),
             locks: HashMap::new(),
         };
@@ -93,22 +88,25 @@ impl Manager {
         match tx.kind {
             TransactionKind::Action(Action::Nil) => {
                 let tx = self.transactions.remove(txid).unwrap();
-                let affected = tx
-                    .locks
-                    .iter()
-                    .filter(|(_, l)| l.did_write)
-                    .map(|(a, _)| a.clone())
-                    .collect::<HashSet<_>>();
 
-                let mut predecessors = tx.predecessors;
-                predecessors.insert(tx.id.clone(), TxMeta { affected });
+                let txid = tx.id;
+                let basis = tx
+                    .locks
+                    .values()
+                    .fold(BasisStamp::empty(), |mut basis, lock| {
+                        if let LockValue::Some(..) = lock.value {
+                            basis.merge_from(&lock.basis);
+                        }
+
+                        basis
+                    });
 
                 for (address, _) in tx.locks {
                     ctx.send(
                         &address,
                         Message::Release {
-                            txid: tx.id.clone(),
-                            predecessors: predecessors.clone(),
+                            txid: txid.clone(),
+                            basis: basis.clone(),
                         },
                     );
                 }
@@ -137,8 +135,8 @@ impl Actor for Manager {
             Message::LockGranted {
                 txid,
                 address,
-                completed,
-                ancestor_vars,
+                basis,
+                roots,
             } => {
                 let tx = self.transactions.get_mut(&txid).unwrap();
 
@@ -150,19 +148,18 @@ impl Actor for Manager {
                     address,
                     Lock {
                         value: LockValue::None(ReadRequest::None),
-                        did_write: false,
-                        completed,
-                        ancestor_vars,
+                        wrote: false,
+                        basis,
+                        roots,
                     },
                 );
 
                 self.eval(&txid, &ctx);
             }
-            Message::ReadValue {
+            Message::ReadResult {
                 txid,
                 address,
                 value,
-                predecessors,
             } => {
                 let tx = self
                     .transactions
@@ -178,10 +175,6 @@ impl Actor for Manager {
 
                 lock.value = LockValue::Some(value);
 
-                for (txid, meta) in predecessors {
-                    tx.predecessors.insert(txid, meta);
-                }
-
                 self.eval(&txid, &ctx);
             }
             _ => todo!(),
@@ -194,53 +187,25 @@ impl Transaction {
         match &mut self.kind {
             TransactionKind::Action(action) => {
                 let mut action = mem::replace(action, Action::Nil);
+
                 self.may_write.clear();
-                action.traverse(&mut TransactionContext { tx: self, ctx });
-                action.eval(&mut TransactionContext { tx: self, ctx });
-                self.kind = TransactionKind::Action(action);
-
-                /*if let Action::Nil = action {
-                    // complete the txn
-
-                    let affected = self
-                        .locks
-                        .iter()
-                        .filter(|(_, l)| l.did_write)
-                        .map(|(a, _)| a.clone())
-                        .collect::<HashSet<_>>();
-
-                    let mut predecessors = self.predecessors;
-                    predecessors.insert(self.id.clone(), TxMeta { affected });
-
-                    for (address, _) in self.locks {
-                        ctx.send(
-                            &address,
-                            Message::Release {
-                                txid: self.id.clone(),
-                                predecessors: predecessors.clone(),
-                            },
-                        );
+                action.visit_writes(|address, definite| {
+                    if definite {
+                        self.lock(address, LockKind::Exclusive, ctx);
+                    } else {
+                        self.may_write.insert(address.clone());
                     }
+                });
 
-                    None
-                } else {
-                    self.kind = TransactionKind::Action(action);
+                action.eval(&mut TransactionContext { tx: self, ctx });
 
-                    Some(self)
-                }*/
+                self.kind = TransactionKind::Action(action);
             }
             TransactionKind::Upgrade(upgrade) => {
                 let mut upgrade = mem::replace(upgrade, Upgrade::Nil);
                 self.may_write.clear();
-                upgrade.traverse(&mut TransactionContext { tx: self, ctx });
                 upgrade.eval(&mut TransactionContext { tx: self, ctx });
                 self.kind = TransactionKind::Upgrade(upgrade);
-
-                /*if let Upgrade::Nil = upgrade {
-                    todo!()
-                } else {
-                    todo!()
-                }*/
             }
         }
     }
@@ -274,12 +239,19 @@ impl Transaction {
             return false;
         };
 
-        if let LockValue::None(ReadRequest::Pending) = &lock.value {
+        if let LockValue::None(ReadRequest::Pending) = lock.value {
             // cannot perform this write until we have gotten the value back
             return false;
         }
 
+        if let LockValue::None(ReadRequest::None) = lock.value {
+            let own_iteration = lock.basis.latest(address);
+            lock.basis = BasisStamp::empty();
+            lock.basis.add(address.clone(), own_iteration);
+        }
+
         lock.value = LockValue::Some(value.clone());
+        lock.wrote = true;
 
         ctx.send(
             address,
@@ -310,23 +282,22 @@ impl Transaction {
         }
 
         if let LockValue::None(ReadRequest::None) = &lock.value {
-            let mut predecessors = HashSet::new();
-            for ancestor_address in lock.ancestor_vars.clone() {
-                let Some(lock) = self.lock(&ancestor_address, LockKind::Shared, ctx) else {
+            let mut basis = BasisStamp::empty();
+            for root_address in lock.roots.clone() {
+                let Some(lock) = self.lock(&root_address, LockKind::Shared, ctx) else {
                     // cannot perform this read until this ancestor is locked
                     return None;
                 };
 
-                for txid in &lock.completed {
-                    predecessors.insert(txid.clone());
-                }
+                let latest = lock.basis.latest(&root_address);
+                basis.add(root_address, latest);
             }
 
             ctx.send(
                 address,
                 Message::Read {
                     txid: self.id.clone(),
-                    predecessors,
+                    basis,
                 },
             );
 
@@ -356,50 +327,15 @@ impl<'a, 'c> UpgradeEvalContext for TransactionContext<'a, 'c> {
     }
 }
 
-impl<'a, 'c> UpgradeTraversalContext for TransactionContext<'a, 'c> {
-    fn will_var(&mut self, name: Name, replace: Option<Address>) {
-        todo!()
-    }
-
-    fn will_def(&mut self, name: Name, replace: Option<Address>) {
-        todo!()
-    }
-
-    fn will_del(&mut self, address: Address) {
-        todo!()
-    }
-}
-
 impl<'a, 'c> ActionEvalContext for TransactionContext<'a, 'c> {
     fn write(&mut self, address: &Address, value: &Value) -> bool {
         self.tx.write(address, value, self.ctx)
     }
 }
 
-impl<'a, 'c> ActionTraversalContext for TransactionContext<'a, 'c> {
-    fn will_write(&mut self, address: &Address) {
-        self.tx.lock(address, LockKind::Exclusive, self.ctx);
-    }
-
-    fn may_write(&mut self, address: &Address) {
-        self.tx.may_write.insert(address.clone());
-    }
-}
-
 impl<'a, 'c> ExprEvalContext for TransactionContext<'a, 'c> {
     fn read(&mut self, address: &Address) -> Option<&Value> {
         self.tx.read(address, self.ctx)
-    }
-}
-
-impl<'a, 'c> ExprTraversalContext for TransactionContext<'a, 'c> {
-    fn will_read(&mut self, ident: &Address) {
-        // TODO: request some locks in advance?
-        _ = ident;
-    }
-
-    fn may_read(&mut self, ident: &Address) {
-        _ = ident;
     }
 }
 

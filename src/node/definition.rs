@@ -66,7 +66,7 @@ impl Definition {
             }));
 
         let mut referenced_inputs = HashSet::new();
-        self.expr.may_read(|address| {
+        self.expr.visit_reads(|address, _definite| {
             referenced_inputs.insert(address.clone());
         });
 

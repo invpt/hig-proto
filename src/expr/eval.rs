@@ -81,6 +81,34 @@ impl Upgrade {
             Upgrade::Nil => {}
         }
     }
+
+    pub fn visit_writes(&self, mut visitor: impl FnMut(&UpgradeIdent, bool)) {
+        match self {
+            Upgrade::Seq(a, b) => {
+                a.visit_writes(&mut visitor);
+                b.visit_writes(&mut visitor);
+            }
+            Upgrade::Var(..) | Upgrade::Def(..) | Upgrade::Del(..) => {}
+            Upgrade::Do(action) => {
+                action.visit_writes(visitor);
+            }
+            Upgrade::Nil => {}
+        }
+    }
+
+    pub fn visit_reads(&self, mut visitor: impl FnMut(&UpgradeIdent, bool)) {
+        match self {
+            Upgrade::Seq(a, b) => {
+                a.visit_reads(&mut visitor);
+                b.visit_reads(&mut visitor);
+            }
+            Upgrade::Var(..) | Upgrade::Def(..) | Upgrade::Del(..) => {}
+            Upgrade::Do(action) => {
+                action.visit_writes(visitor);
+            }
+            Upgrade::Nil => {}
+        }
+    }
 }
 
 impl<Ident> Action<Ident> {
@@ -111,7 +139,35 @@ impl<Ident> Action<Ident> {
                     }
                 }
             }
-            Action::Nil => (),
+            Action::Nil => {}
+        }
+    }
+
+    /// Traverses the expression, calling the callback with each Ident the Action might write to.
+    pub fn visit_writes(&self, mut visitor: impl FnMut(&Ident, bool)) {
+        match self {
+            Action::Seq(a, b) => {
+                a.visit_writes(&mut visitor);
+                b.visit_writes(&mut visitor);
+            }
+            Action::Write(ident, _) => {
+                visitor(ident, true);
+            }
+            Action::Nil => {}
+        }
+    }
+
+    /// Traverses the expression, calling the callback with each Ident the Action might read from.
+    pub fn visit_reads(&self, mut visitor: impl FnMut(&Ident, bool)) {
+        match self {
+            Action::Seq(a, b) => {
+                a.visit_reads(&mut visitor);
+                b.visit_reads(&mut visitor);
+            }
+            Action::Write(_, expr) => {
+                expr.visit_reads(visitor);
+            }
+            Action::Nil => {}
         }
     }
 }
@@ -184,15 +240,15 @@ impl<Ident> Expr<Ident> {
     }
 
     /// Traverses the expression, calling the callback with each Ident the Expr might read from.
-    pub fn may_read(&self, mut cb: impl FnMut(&Ident)) {
+    pub fn visit_reads(&self, mut visitor: impl FnMut(&Ident, bool)) {
         match self {
             Expr::Tuple(items) => {
                 for item in items {
-                    item.may_read(&mut cb);
+                    item.visit_reads(&mut visitor);
                 }
             }
-            Expr::Read(ident) => cb(ident),
-            Expr::Value(value) => (),
+            Expr::Read(ident) => visitor(ident, true),
+            Expr::Value(_) => (),
         }
     }
 }
