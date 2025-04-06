@@ -1,4 +1,4 @@
-use std::{collections::HashMap, mem};
+use std::mem;
 
 use crate::{actor::Address, value::Value};
 
@@ -10,31 +10,11 @@ pub trait UpgradeEvalContext: ActionEvalContext + Resolver<UpgradeIdent> {
     fn del(&mut self, address: Address);
 }
 
-pub trait UpgradeTraversalContext: ActionTraversalContext {
-    fn will_var(&mut self, name: Name, replace: Option<Address>);
-    fn will_def(&mut self, name: Name, replace: Option<Address>);
-    fn will_del(&mut self, address: Address);
-}
-
 pub trait ActionEvalContext: ExprEvalContext {
-    /// Writes to the node referenced by `address` with the given `value`.
+    /// Attempts to write to the node referenced by `address` with the given `value`.
     ///
     /// Returns true if the write was performed.
     fn write(&mut self, address: &Address, value: &Value) -> bool;
-}
-
-pub trait ActionTraversalContext: ExprTraversalContext {
-    /// Indicates that the node referenced by `address` is guaranteed to be written to by a future
-    /// call to `write`.
-    fn will_write(&mut self, address: &Address) {
-        _ = address;
-    }
-
-    /// Indicates that the node referenced by `address` may potentially be written to by a future
-    /// call to `write`.
-    fn may_write(&mut self, address: &Address) {
-        _ = address;
-    }
 }
 
 pub trait ExprEvalContext {
@@ -46,25 +26,6 @@ pub trait ExprEvalContext {
 
 pub trait Resolver<Ident> {
     fn resolve<'a>(&mut self, ident: &'a Ident) -> Option<&'a Address>;
-}
-
-pub trait ExprTraversalContext {
-    /// Indicates that the node referenced by `ident` is guaranteed to be read with a future call
-    /// to `read`.
-    ///
-    /// An important distinction of this method compared to `read` is that reads indicated by
-    /// calling this method may occur following a conflicting read. So, while `read` indicates that
-    /// the *currently held* value of an `ident` needs to be read, `will_read` indicates that some
-    /// *future* value of an `ident` will need to be read.
-    fn will_read(&mut self, address: &Address) {
-        _ = address;
-    }
-
-    /// Indicates that the node referenced by `ident` may potentially be read with a future call
-    /// to `read`.
-    fn may_read(&mut self, address: &Address) {
-        _ = address;
-    }
 }
 
 impl Upgrade {
@@ -93,13 +54,13 @@ impl Upgrade {
                     panic!("var expr could not be fully evaluated")
                 }
             }
-            Upgrade::Def(_, _, expr) => {
-                let Some(expr) = (&*expr).resolve(ctx) else {
-                    panic!("def expr could not be fully resolved")
+            Upgrade::Def(..) => {
+                let Upgrade::Def(name, replace, expr) = mem::replace(self, Upgrade::Nil) else {
+                    unreachable!()
                 };
 
-                let Upgrade::Def(name, replace, _) = mem::replace(self, Upgrade::Nil) else {
-                    unreachable!()
+                let Some(expr) = expr.resolve(ctx) else {
+                    panic!("def expr could not be fully resolved")
                 };
 
                 ctx.def(name, replace, expr);
@@ -121,8 +82,32 @@ impl Upgrade {
         }
     }
 
-    pub fn traverse(&mut self, ctx: &mut impl UpgradeTraversalContext) {
-        todo!()
+    pub fn visit_writes(&self, mut visitor: impl FnMut(&UpgradeIdent, bool)) {
+        match self {
+            Upgrade::Seq(a, b) => {
+                a.visit_writes(&mut visitor);
+                b.visit_writes(&mut visitor);
+            }
+            Upgrade::Var(..) | Upgrade::Def(..) | Upgrade::Del(..) => {}
+            Upgrade::Do(action) => {
+                action.visit_writes(visitor);
+            }
+            Upgrade::Nil => {}
+        }
+    }
+
+    pub fn visit_reads(&self, mut visitor: impl FnMut(&UpgradeIdent, bool)) {
+        match self {
+            Upgrade::Seq(a, b) => {
+                a.visit_reads(&mut visitor);
+                b.visit_reads(&mut visitor);
+            }
+            Upgrade::Var(..) | Upgrade::Def(..) | Upgrade::Del(..) => {}
+            Upgrade::Do(action) => {
+                action.visit_writes(visitor);
+            }
+            Upgrade::Nil => {}
+        }
     }
 }
 
@@ -154,36 +139,33 @@ impl<Ident> Action<Ident> {
                     }
                 }
             }
-            Action::Nil => (),
+            Action::Nil => {}
         }
     }
 
-    pub fn traverse<C>(&mut self, ctx: &mut C)
-    where
-        C: ActionTraversalContext + Resolver<Ident>,
-    {
-        self.traverse_inner(false, ctx);
-    }
-
-    fn traverse_inner<C>(&mut self, conditional: bool, ctx: &mut C)
-    where
-        C: ActionTraversalContext + Resolver<Ident>,
-    {
+    /// Traverses the expression, calling the callback with each Ident the Action might write to.
+    pub fn visit_writes(&self, mut visitor: impl FnMut(&Ident, bool)) {
         match self {
             Action::Seq(a, b) => {
-                a.traverse_inner(conditional, ctx);
-                b.traverse_inner(conditional, ctx);
+                a.visit_writes(&mut visitor);
+                b.visit_writes(&mut visitor);
             }
-            Action::Write(ident, expr) => {
-                expr.traverse_inner(conditional, ctx);
+            Action::Write(ident, _) => {
+                visitor(ident, true);
+            }
+            Action::Nil => {}
+        }
+    }
 
-                if let Some(address) = ctx.resolve(ident) {
-                    if conditional {
-                        ctx.may_write(address);
-                    } else {
-                        ctx.will_write(address);
-                    }
-                }
+    /// Traverses the expression, calling the callback with each Ident the Action might read from.
+    pub fn visit_reads(&self, mut visitor: impl FnMut(&Ident, bool)) {
+        match self {
+            Action::Seq(a, b) => {
+                a.visit_reads(&mut visitor);
+                b.visit_reads(&mut visitor);
+            }
+            Action::Write(_, expr) => {
+                expr.visit_reads(visitor);
             }
             Action::Nil => {}
         }
@@ -233,7 +215,7 @@ impl<Ident> Expr<Ident> {
         }
     }
 
-    fn resolve<C>(&self, ctx: &mut C) -> Option<Expr>
+    fn resolve<C>(self, ctx: &mut C) -> Option<Expr>
     where
         C: Resolver<Ident>,
     {
@@ -253,39 +235,20 @@ impl<Ident> Expr<Ident> {
                 Some(address) => Some(Expr::Read(address.clone())),
                 None => None,
             },
-            Expr::Value(value) => Some(Expr::Value(value.clone())),
+            Expr::Value(value) => Some(Expr::Value(value)),
         }
     }
 
-    pub fn traverse<C>(&mut self, ctx: &mut C)
-    where
-        C: ExprTraversalContext + Resolver<Ident>,
-    {
-        self.traverse_inner(false, ctx);
-    }
-
-    fn traverse_inner<C>(&mut self, conditional: bool, ctx: &mut C)
-    where
-        C: ExprTraversalContext + Resolver<Ident>,
-    {
+    /// Traverses the expression, calling the callback with each Ident the Expr might read from.
+    pub fn visit_reads(&self, mut visitor: impl FnMut(&Ident, bool)) {
         match self {
             Expr::Tuple(items) => {
                 for item in items {
-                    item.traverse_inner(conditional, ctx);
+                    item.visit_reads(&mut visitor);
                 }
             }
-            Expr::Read(ident) => {
-                let Some(address) = ctx.resolve(ident) else {
-                    return;
-                };
-
-                if conditional {
-                    ctx.may_read(address);
-                } else {
-                    ctx.will_read(address);
-                }
-            }
-            Expr::Value(_) => {}
+            Expr::Read(ident) => visitor(ident, true),
+            Expr::Value(_) => (),
         }
     }
 }
@@ -293,11 +256,5 @@ impl<Ident> Expr<Ident> {
 impl<C> Resolver<Address> for C {
     fn resolve<'a>(&mut self, ident: &'a Address) -> Option<&'a Address> {
         Some(ident)
-    }
-}
-
-impl ExprEvalContext for HashMap<Address, Value> {
-    fn read(&mut self, address: &Address) -> Option<&Value> {
-        self.get(address)
     }
 }

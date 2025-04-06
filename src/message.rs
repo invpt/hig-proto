@@ -1,11 +1,11 @@
 use std::{
-    collections::{HashMap, HashSet},
+    cmp::Ordering,
+    collections::{hash_map::Entry, HashMap, HashSet},
     time::SystemTime,
 };
 
 use crate::{
     actor::{Address, Version},
-    definition::{self, InputMetadata},
     expr::{Action, Expr, Name, Upgrade},
     value::Value,
 };
@@ -18,13 +18,12 @@ pub enum Message {
     },
 
     // propagation
-    Update {
+    Propagate {
         sender: Address,
-        value: Value,
-        predecessors: HashMap<TxId, TxMeta>,
+        value: StampedValue,
     },
 
-    // mutation - initial lock request
+    // transaction - initial lock request
     Lock {
         txid: TxId,
         kind: LockKind,
@@ -32,25 +31,23 @@ pub enum Message {
     LockGranted {
         txid: TxId,
         address: Address,
-        completed: HashSet<TxId>,
-        ancestor_vars: HashSet<Address>,
+        basis: BasisStamp,
+        roots: HashSet<Address>,
     },
 
     // transaction - messages available to shared and exclusive locks
-    SubscriptionUpdate {
-        txid: TxId,
-        subscriber: Address,
-        subscribe: bool,
-    },
     Read {
         txid: TxId,
-        predecessors: HashSet<TxId>,
+        basis: BasisStamp,
     },
-    ReadValue {
+    ReadResult {
         txid: TxId,
         address: Address,
         value: Value,
-        predecessors: HashMap<TxId, TxMeta>,
+    },
+    UpdateSubscriptions {
+        txid: TxId,
+        changes: HashMap<Address, bool>,
     },
 
     // transaction - messages available to exclusive locks
@@ -58,18 +55,15 @@ pub enum Message {
         txid: TxId,
         value: Value,
     },
-    UpdateDefinitiion {
-        input_metadata: HashMap<Address, InputMetadata>,
-        expr: Expr,
-    },
-    UpdateVariable {
-        value: Value,
+    Reconfigure {
+        txid: TxId,
+        configuration: NodeConfiguration,
     },
     Retire {
         txid: TxId,
     },
 
-    // mutation - messages related to ending the lock
+    // transaction - messages related to ending the lock
     Preempt {
         txid: TxId,
     },
@@ -78,7 +72,7 @@ pub enum Message {
     },
     Release {
         txid: TxId,
-        predecessors: HashMap<TxId, TxMeta>,
+        basis: BasisStamp,
     },
 
     // messages sent/received by managers
@@ -94,6 +88,90 @@ pub enum Message {
 }
 
 #[derive(Clone)]
+pub struct StampedValue {
+    pub value: Value,
+    pub basis: BasisStamp,
+}
+
+#[derive(Clone)]
+pub struct BasisStamp {
+    pub root_iterations: HashMap<Address, Iteration>,
+}
+
+impl BasisStamp {
+    pub fn empty() -> BasisStamp {
+        BasisStamp {
+            root_iterations: HashMap::new(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.root_iterations.is_empty()
+    }
+
+    pub fn latest(&self, address: &Address) -> Iteration {
+        self.root_iterations
+            .get(address)
+            .copied()
+            .unwrap_or(Iteration(0))
+    }
+
+    pub fn add(&mut self, address: Address, iteration: Iteration) {
+        match self.root_iterations.entry(address) {
+            Entry::Vacant(entry) => {
+                entry.insert(iteration);
+            }
+            Entry::Occupied(mut entry) => {
+                *entry.get_mut() = (*entry.get()).max(iteration);
+            }
+        }
+    }
+
+    pub fn merge_from(&mut self, other: &BasisStamp) {
+        for (address, iteration) in &other.root_iterations {
+            self.add(address.clone(), *iteration);
+        }
+    }
+
+    pub fn prec_eq_wrt_roots(&self, other: &BasisStamp, roots: &HashSet<Address>) -> bool {
+        for root in roots {
+            if self.latest(root) > other.latest(root) {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Iteration(usize);
+
+impl Iteration {
+    #[must_use]
+    pub fn increment(self) -> Iteration {
+        Iteration(self.0 + 1)
+    }
+}
+
+#[derive(Clone)]
+pub enum NodeConfiguration {
+    Variable {
+        value: StampedValue,
+    },
+    Definition {
+        expr: Expr,
+        inputs: HashMap<Address, InputConfiguration>,
+    },
+}
+
+#[derive(Clone)]
+pub struct InputConfiguration {
+    pub roots: HashSet<Address>,
+    pub value: StampedValue,
+}
+
+#[derive(Clone)]
 pub struct DirectoryState {
     pub managers: HashMap<Address, bool>,
 
@@ -102,20 +180,20 @@ pub struct DirectoryState {
     pub nodes: HashMap<Name, HashMap<Address, Option<Version>>>,
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TxId {
-    pub kind: TxKind,
+    pub priority: TxPriority,
     pub timestamp: Timestamp,
     pub address: Address,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum TxKind {
-    Code = 0,
-    Data = 1,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TxPriority {
+    High = 0,
+    Low = 1,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timestamp {
     epoch_micros: u64,
 }
@@ -151,12 +229,7 @@ impl MonotonicTimestampGenerator {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
-pub struct TxMeta {
-    pub affected: HashSet<Address>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LockKind {
     Shared = 0,
     Exclusive = 1,
