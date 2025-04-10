@@ -141,6 +141,36 @@ impl Directory {
         self.disseminate_state(ctx);
     }
 
+    pub fn delete(&mut self, address: VersionedAddress, ctx: &Context) -> bool {
+        let instances = self
+            .state
+            .nodes
+            .values_mut()
+            .flat_map(|addresses| addresses.get_mut(&address.address))
+            .filter(|v| **v == Some(address.version))
+            .map(|v| v);
+
+        let mut deleted = false;
+        for version in instances {
+            *version = None;
+            deleted = true;
+        }
+
+        if deleted {
+            self.disseminate_state(ctx);
+        }
+
+        deleted
+    }
+
+    pub fn has(&self, address: &VersionedAddress) -> bool {
+        self.state
+            .nodes
+            .values()
+            .flat_map(|addresses| addresses.get(&address.address))
+            .any(|v| *v == Some(address.version))
+    }
+
     fn disseminate_state(&self, ctx: &Context) {
         for (peer, removed) in &self.state.managers {
             if *removed || peer == ctx.me() {

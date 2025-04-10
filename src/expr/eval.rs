@@ -83,6 +83,19 @@ impl Upgrade {
         }
     }
 
+    pub fn visit_upgrades(&self, mut visitor: impl FnMut(&VersionedAddress)) {
+        match self {
+            Upgrade::Seq(a, b) => {
+                a.visit_upgrades(&mut visitor);
+                b.visit_upgrades(&mut visitor);
+            }
+            Upgrade::Var(_, Some(address), _) => visitor(address),
+            Upgrade::Def(_, Some(address), _) => visitor(address),
+            Upgrade::Del(address) => visitor(address),
+            _ => {}
+        }
+    }
+
     pub fn visit_writes(&self, mut visitor: impl FnMut(&Ident, bool)) {
         match self {
             Upgrade::Seq(a, b) => {

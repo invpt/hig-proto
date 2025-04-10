@@ -24,7 +24,7 @@ pub enum Upgrade {
     // NOTE: control flow for upgrades is not planned
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq, Eq)]
 pub enum Ident {
     New(Name),
     Existing(VersionedAddress),

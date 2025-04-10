@@ -1,4 +1,5 @@
 use std::{
+    borrow::Borrow,
     collections::{HashMap, HashSet},
     mem,
 };
@@ -27,7 +28,8 @@ struct Transaction {
     may_write: HashSet<Address>,
     pending_locks: HashSet<Address>,
     locks: HashMap<Address, Lock>,
-    nodes: HashMap<Ident, NodeUpdate>,
+    new_nodes: HashMap<Name, NewNode>,
+    deleted_nodes: HashMap<Address, Version>,
 }
 
 enum TransactionKind {
@@ -53,15 +55,9 @@ enum ReadRequest {
     Pending,
 }
 
-struct NodeUpdate {
-    replace: Option<Address>,
-    kind: NodeUpdateKind,
-}
-
-enum NodeUpdateKind {
-    Var(Value),
-    Def(Expr<Ident>),
-    Del,
+enum NewNode {
+    Var(Option<VersionedAddress>, Value),
+    Def(Option<VersionedAddress>, Expr<Ident>, Option<Expr<Ident>>),
 }
 
 #[derive(Debug)]
@@ -90,7 +86,8 @@ impl Manager {
             may_write: HashSet::new(),
             pending_locks: HashSet::new(),
             locks: HashMap::new(),
-            nodes: HashMap::new(),
+            new_nodes: HashMap::new(),
+            deleted_nodes: HashMap::new(),
         };
 
         self.transactions.insert(txid.clone(), tx);
@@ -227,6 +224,12 @@ impl Transaction {
             }
             TransactionKind::Upgrade(upgrade) => {
                 let mut upgrade = mem::replace(upgrade, Upgrade::Nil);
+
+                upgrade.visit_upgrades(|address| {
+                    self.lock_versioned(address, LockKind::Exclusive, ctx)
+                        .expect("invalid version (TODO: don't panic)");
+                });
+
                 self.may_write.clear();
                 upgrade.visit_writes(|ident, definite| {
                     let Ident::Existing(address) = ident else {
@@ -240,11 +243,13 @@ impl Transaction {
                         self.may_write.insert(address.address.clone());
                     }
                 });
+
                 upgrade.eval(&mut TransactionContext {
                     tx: self,
                     directory,
                     ctx,
                 });
+
                 self.kind = TransactionKind::Upgrade(upgrade);
             }
         }
@@ -253,7 +258,7 @@ impl Transaction {
     fn lock_versioned(
         &mut self,
         address: &VersionedAddress,
-        mut kind: LockKind,
+        kind: LockKind,
         ctx: &Context,
     ) -> Result<Option<&mut Lock>, VersionMismatch> {
         match self.lock(&address.address, kind, ctx) {
@@ -292,92 +297,143 @@ impl Transaction {
     }
 
     fn write(&mut self, ident: IdentRef, value: &Value, ctx: &Context) -> bool {
-        let IdentRef::Existing(address) = ident else {
-            todo!()
-        };
+        match ident {
+            IdentRef::New(name) => {
+                let node = self
+                    .new_nodes
+                    .get_mut(name)
+                    .expect("can't write to nonexistent node");
 
-        let Some(lock) = self
-            .lock_versioned(&address, LockKind::Exclusive, ctx)
-            .expect("invalid version (TODO: don't panic)")
-        else {
-            // cannot perform this write until the variable is locked
-            return false;
-        };
+                let NewNode::Var(_, current_value) = node else {
+                    panic!("can't write to definition")
+                };
 
-        if let LockValue::None(ReadRequest::Pending) = lock.value {
-            // cannot perform this write until we have gotten the value back
-            return false;
+                *current_value = value.clone();
+
+                true
+            }
+            IdentRef::Existing(address) => {
+                let Some(lock) = self
+                    .lock_versioned(&address, LockKind::Exclusive, ctx)
+                    .expect("invalid version (TODO: don't panic)")
+                else {
+                    // cannot perform this write until the variable is locked
+                    return false;
+                };
+
+                if let LockValue::None(ReadRequest::Pending) = lock.value {
+                    // cannot perform this write until we have gotten the value back
+                    return false;
+                }
+
+                if let LockValue::None(ReadRequest::None) = lock.value {
+                    let own_iteration = lock.basis.latest(&address.address);
+                    lock.basis = BasisStamp::empty();
+                    lock.basis.add(address.address.clone(), own_iteration);
+                }
+
+                lock.value = LockValue::Some(value.clone());
+                lock.wrote = true;
+
+                ctx.send(
+                    &address.address,
+                    Message::Write {
+                        txid: self.id.clone(),
+                        value: value.clone(),
+                    },
+                );
+
+                true
+            }
         }
-
-        if let LockValue::None(ReadRequest::None) = lock.value {
-            let own_iteration = lock.basis.latest(&address.address);
-            lock.basis = BasisStamp::empty();
-            lock.basis.add(address.address.clone(), own_iteration);
-        }
-
-        lock.value = LockValue::Some(value.clone());
-        lock.wrote = true;
-
-        ctx.send(
-            &address.address,
-            Message::Write {
-                txid: self.id.clone(),
-                value: value.clone(),
-            },
-        );
-
-        true
     }
 
-    fn read(&mut self, ident: IdentRef, ctx: &Context) -> Option<&Value> {
-        let IdentRef::Existing(address) = ident else {
-            todo!()
-        };
+    fn read(&mut self, ident: IdentRef, directory: &Directory, ctx: &Context) -> Option<&Value> {
+        match ident {
+            IdentRef::New(name) => {
+                let node = self
+                    .new_nodes
+                    .get_mut(name)
+                    .expect("can't write to nonexistent node");
 
-        let Some(lock) = self
-            .lock_versioned(&address, LockKind::Shared, ctx)
-            .expect("invalid version (TODO: don't panic)")
-        else {
-            // cannot perform this read until the variable is locked
-            return None;
-        };
+                match node {
+                    NewNode::Var(_, _value_that_is_exactly_what_we_need) => {
+                        // polonius when... T~T
+                        let NewNode::Var(_, value) = self.new_nodes.get(name).unwrap() else {
+                            unreachable!()
+                        };
 
-        if let LockValue::Some(_value_that_is_exactly_what_we_need) = &lock.value {
-            // can't use _value_that_is_exactly_what_we_need because rust is dumb without Polonius
-            // this incantation grabs a fresh reference exactly equal to _value_that_is_exactly_what_we_need...
-            let LockValue::Some(value) = &self.locks.get(&address.address).unwrap().value else {
-                unreachable!()
-            };
+                        Some(value)
+                    }
+                    NewNode::Def(_, expr, computation) => {
+                        let mut computation = computation.take().unwrap_or_else(|| expr.clone());
 
-            // we already have a value
-            return Some(value);
-        }
+                        computation.eval(&mut TransactionContext {
+                            tx: self,
+                            directory,
+                            ctx,
+                        });
 
-        if let LockValue::None(ReadRequest::None) = &lock.value {
-            let mut basis = BasisStamp::empty();
-            for root_address in lock.roots.clone() {
-                let Some(lock) = self.lock(&root_address, LockKind::Shared, ctx) else {
-                    // cannot perform this read until this ancestor is locked
+                        let NewNode::Def(_, _, slot) = self.new_nodes.get_mut(name).unwrap() else {
+                            unreachable!()
+                        };
+
+                        if let Expr::Value(value) = slot.insert(computation) {
+                            Some(value)
+                        } else {
+                            None
+                        }
+                    }
+                }
+            }
+            IdentRef::Existing(address) => {
+                let Some(lock) = self
+                    .lock_versioned(&address, LockKind::Shared, ctx)
+                    .expect("invalid version (TODO: don't panic)")
+                else {
+                    // cannot perform this read until the variable is locked
                     return None;
                 };
 
-                let latest = lock.basis.latest(&root_address);
-                basis.add(root_address, latest);
+                if let LockValue::Some(_value_that_is_exactly_what_we_need) = &lock.value {
+                    // can't use _value_that_is_exactly_what_we_need because rust is dumb without Polonius
+                    // this incantation grabs a fresh reference exactly equal to _value_that_is_exactly_what_we_need...
+                    let LockValue::Some(value) = &self.locks.get(&address.address).unwrap().value
+                    else {
+                        unreachable!()
+                    };
+
+                    // we already have a value
+                    return Some(value);
+                }
+
+                if let LockValue::None(ReadRequest::None) = &lock.value {
+                    let mut basis = BasisStamp::empty();
+                    for root_address in lock.roots.clone() {
+                        let Some(lock) = self.lock(&root_address, LockKind::Shared, ctx) else {
+                            // cannot perform this read until this ancestor is locked
+                            return None;
+                        };
+
+                        let latest = lock.basis.latest(&root_address);
+                        basis.add(root_address, latest);
+                    }
+
+                    ctx.send(
+                        &address.address,
+                        Message::Read {
+                            txid: self.id.clone(),
+                            basis,
+                        },
+                    );
+
+                    self.locks.get_mut(&address.address).unwrap().value =
+                        LockValue::None(ReadRequest::Pending);
+                }
+
+                None
             }
-
-            ctx.send(
-                &address.address,
-                Message::Read {
-                    txid: self.id.clone(),
-                    basis,
-                },
-            );
-
-            self.locks.get_mut(&address.address).unwrap().value =
-                LockValue::None(ReadRequest::Pending);
         }
-
-        None
     }
 }
 
@@ -389,11 +445,11 @@ struct TransactionContext<'a, 'c> {
 
 impl<'a, 'c> UpgradeEvalContext for TransactionContext<'a, 'c> {
     fn var(&mut self, name: Name, replace: Option<VersionedAddress>, value: Value) -> bool {
-        if let Some(address) = replace {
+        if let Some(address) = &replace {
             if !self
                 .directory
                 .get(&name)
-                .any(|known_address| known_address == address)
+                .any(|known_address| known_address == *address)
             {
                 return false;
             }
@@ -401,15 +457,41 @@ impl<'a, 'c> UpgradeEvalContext for TransactionContext<'a, 'c> {
             return false;
         }
 
+        self.tx.new_nodes.insert(name, NewNode::Var(replace, value));
+
         true
     }
 
     fn def(&mut self, name: Name, replace: Option<VersionedAddress>, expr: Expr<Ident>) -> bool {
-        todo!()
+        if let Some(address) = &replace {
+            if !self
+                .directory
+                .get(&name)
+                .any(|known_address| known_address == *address)
+            {
+                return false;
+            }
+        } else if self.directory.get(&name).count() > 0 {
+            return false;
+        }
+
+        self.tx
+            .new_nodes
+            .insert(name, NewNode::Def(replace, expr, None));
+
+        true
     }
 
     fn del(&mut self, address: VersionedAddress) -> bool {
-        todo!()
+        if self.directory.has(&address) {
+            self.tx
+                .deleted_nodes
+                .insert(address.address, address.version);
+
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -427,7 +509,7 @@ where
     for<'i> IdentRef<'i>: From<&'i I>,
 {
     fn read(&mut self, ident: &I) -> Option<&Value> {
-        self.tx.read(ident.into(), self.ctx)
+        self.tx.read(ident.into(), self.directory, self.ctx)
     }
 }
 
