@@ -4,11 +4,11 @@ use std::{
 };
 
 use crate::{
-    actor::{Actor, Address, Context},
+    actor::{Actor, Address, Context, Version, VersionedAddress},
     directory::{Directory, DirectoryEvent},
     expr::{
-        eval::{ActionEvalContext, ExprEvalContext, Resolver, UpgradeEvalContext},
-        Action, Expr, Name, Upgrade, UpgradeIdent,
+        eval::{ActionEvalContext, ExprEvalContext, UpgradeEvalContext},
+        Action, Expr, Ident, Name, Upgrade,
     },
     message::{BasisStamp, LockKind, Message, MonotonicTimestampGenerator, TxId, TxPriority},
     value::Value,
@@ -27,6 +27,7 @@ struct Transaction {
     may_write: HashSet<Address>,
     pending_locks: HashSet<Address>,
     locks: HashMap<Address, Lock>,
+    nodes: HashMap<Ident, NodeUpdate>,
 }
 
 enum TransactionKind {
@@ -39,6 +40,7 @@ struct Lock {
     wrote: bool,
     basis: BasisStamp,
     roots: HashSet<Address>,
+    version: Version,
 }
 
 enum LockValue {
@@ -51,6 +53,20 @@ enum ReadRequest {
     Pending,
 }
 
+struct NodeUpdate {
+    replace: Option<Address>,
+    kind: NodeUpdateKind,
+}
+
+enum NodeUpdateKind {
+    Var(Value),
+    Def(Expr<Ident>),
+    Del,
+}
+
+#[derive(Debug)]
+struct VersionMismatch;
+
 impl Manager {
     pub fn new(seed_peers: impl Iterator<Item = Address>) -> Manager {
         Manager {
@@ -61,7 +77,7 @@ impl Manager {
         }
     }
 
-    fn do_action(&mut self, action: Action<Address>, ctx: &Context) {
+    fn do_action(&mut self, action: Action, ctx: &Context) {
         let txid = TxId {
             priority: TxPriority::Low,
             timestamp: self.timestamp_generator.generate_timestamp(),
@@ -74,6 +90,7 @@ impl Manager {
             may_write: HashSet::new(),
             pending_locks: HashSet::new(),
             locks: HashMap::new(),
+            nodes: HashMap::new(),
         };
 
         self.transactions.insert(txid.clone(), tx);
@@ -83,7 +100,7 @@ impl Manager {
 
     fn eval(&mut self, txid: &TxId, ctx: &Context) {
         let tx = self.transactions.get_mut(txid).unwrap();
-        tx.eval(ctx);
+        tx.eval(&self.directory, ctx);
 
         match tx.kind {
             TransactionKind::Action(Action::Nil) => {
@@ -137,6 +154,7 @@ impl Actor for Manager {
                 address,
                 basis,
                 roots,
+                version,
             } => {
                 let tx = self.transactions.get_mut(&txid).unwrap();
 
@@ -151,6 +169,7 @@ impl Actor for Manager {
                         wrote: false,
                         basis,
                         roots,
+                        version,
                     },
                 );
 
@@ -183,7 +202,7 @@ impl Actor for Manager {
 }
 
 impl Transaction {
-    pub fn eval(&mut self, ctx: &Context) {
+    pub fn eval(&mut self, directory: &Directory, ctx: &Context) {
         match &mut self.kind {
             TransactionKind::Action(action) => {
                 let mut action = mem::replace(action, Action::Nil);
@@ -191,22 +210,61 @@ impl Transaction {
                 self.may_write.clear();
                 action.visit_writes(|address, definite| {
                     if definite {
-                        self.lock(address, LockKind::Exclusive, ctx);
+                        self.lock_versioned(&address, LockKind::Exclusive, ctx)
+                            .expect("invalid version (TODO: don't panic)");
                     } else {
-                        self.may_write.insert(address.clone());
+                        self.may_write.insert(address.address.clone());
                     }
                 });
 
-                action.eval(&mut TransactionContext { tx: self, ctx });
+                action.eval(&mut TransactionContext {
+                    tx: self,
+                    directory,
+                    ctx,
+                });
 
                 self.kind = TransactionKind::Action(action);
             }
             TransactionKind::Upgrade(upgrade) => {
                 let mut upgrade = mem::replace(upgrade, Upgrade::Nil);
                 self.may_write.clear();
-                upgrade.eval(&mut TransactionContext { tx: self, ctx });
+                upgrade.visit_writes(|ident, definite| {
+                    let Ident::Existing(address) = ident else {
+                        return;
+                    };
+
+                    if definite {
+                        self.lock_versioned(address, LockKind::Exclusive, ctx)
+                            .expect("invalid version (TODO: don't panic)");
+                    } else {
+                        self.may_write.insert(address.address.clone());
+                    }
+                });
+                upgrade.eval(&mut TransactionContext {
+                    tx: self,
+                    directory,
+                    ctx,
+                });
                 self.kind = TransactionKind::Upgrade(upgrade);
             }
+        }
+    }
+
+    fn lock_versioned(
+        &mut self,
+        address: &VersionedAddress,
+        mut kind: LockKind,
+        ctx: &Context,
+    ) -> Result<Option<&mut Lock>, VersionMismatch> {
+        match self.lock(&address.address, kind, ctx) {
+            Some(lock) => {
+                if lock.version == address.version {
+                    Ok(Some(lock))
+                } else {
+                    Err(VersionMismatch)
+                }
+            }
+            None => Ok(None),
         }
     }
 
@@ -233,8 +291,15 @@ impl Transaction {
         None
     }
 
-    fn write(&mut self, address: &Address, value: &Value, ctx: &Context) -> bool {
-        let Some(lock) = self.lock(address, LockKind::Exclusive, ctx) else {
+    fn write(&mut self, ident: IdentRef, value: &Value, ctx: &Context) -> bool {
+        let IdentRef::Existing(address) = ident else {
+            todo!()
+        };
+
+        let Some(lock) = self
+            .lock_versioned(&address, LockKind::Exclusive, ctx)
+            .expect("invalid version (TODO: don't panic)")
+        else {
             // cannot perform this write until the variable is locked
             return false;
         };
@@ -245,16 +310,16 @@ impl Transaction {
         }
 
         if let LockValue::None(ReadRequest::None) = lock.value {
-            let own_iteration = lock.basis.latest(address);
+            let own_iteration = lock.basis.latest(&address.address);
             lock.basis = BasisStamp::empty();
-            lock.basis.add(address.clone(), own_iteration);
+            lock.basis.add(address.address.clone(), own_iteration);
         }
 
         lock.value = LockValue::Some(value.clone());
         lock.wrote = true;
 
         ctx.send(
-            address,
+            &address.address,
             Message::Write {
                 txid: self.id.clone(),
                 value: value.clone(),
@@ -264,8 +329,15 @@ impl Transaction {
         true
     }
 
-    fn read(&mut self, address: &Address, ctx: &Context) -> Option<&Value> {
-        let Some(lock) = self.lock(address, LockKind::Shared, ctx) else {
+    fn read(&mut self, ident: IdentRef, ctx: &Context) -> Option<&Value> {
+        let IdentRef::Existing(address) = ident else {
+            todo!()
+        };
+
+        let Some(lock) = self
+            .lock_versioned(&address, LockKind::Shared, ctx)
+            .expect("invalid version (TODO: don't panic)")
+        else {
             // cannot perform this read until the variable is locked
             return None;
         };
@@ -273,7 +345,7 @@ impl Transaction {
         if let LockValue::Some(_value_that_is_exactly_what_we_need) = &lock.value {
             // can't use _value_that_is_exactly_what_we_need because rust is dumb without Polonius
             // this incantation grabs a fresh reference exactly equal to _value_that_is_exactly_what_we_need...
-            let LockValue::Some(value) = &self.locks.get(address).unwrap().value else {
+            let LockValue::Some(value) = &self.locks.get(&address.address).unwrap().value else {
                 unreachable!()
             };
 
@@ -294,14 +366,15 @@ impl Transaction {
             }
 
             ctx.send(
-                address,
+                &address.address,
                 Message::Read {
                     txid: self.id.clone(),
                     basis,
                 },
             );
 
-            self.locks.get_mut(address).unwrap().value = LockValue::None(ReadRequest::Pending);
+            self.locks.get_mut(&address.address).unwrap().value =
+                LockValue::None(ReadRequest::Pending);
         }
 
         None
@@ -310,40 +383,70 @@ impl Transaction {
 
 struct TransactionContext<'a, 'c> {
     tx: &'a mut Transaction,
+    directory: &'a Directory,
     ctx: &'a Context<'c>,
 }
 
 impl<'a, 'c> UpgradeEvalContext for TransactionContext<'a, 'c> {
-    fn var(&mut self, name: Name, replace: Option<Address>, value: Value) {
+    fn var(&mut self, name: Name, replace: Option<VersionedAddress>, value: Value) -> bool {
+        if let Some(address) = replace {
+            if !self
+                .directory
+                .get(&name)
+                .any(|known_address| known_address == address)
+            {
+                return false;
+            }
+        } else if self.directory.get(&name).count() > 0 {
+            return false;
+        }
+
+        true
+    }
+
+    fn def(&mut self, name: Name, replace: Option<VersionedAddress>, expr: Expr<Ident>) -> bool {
         todo!()
     }
 
-    fn def(&mut self, name: Name, replace: Option<Address>, expr: Expr) {
-        todo!()
-    }
-
-    fn del(&mut self, address: Address) {
+    fn del(&mut self, address: VersionedAddress) -> bool {
         todo!()
     }
 }
 
-impl<'a, 'c> ActionEvalContext for TransactionContext<'a, 'c> {
-    fn write(&mut self, address: &Address, value: &Value) -> bool {
-        self.tx.write(address, value, self.ctx)
+impl<'a, 'c, I> ActionEvalContext<I> for TransactionContext<'a, 'c>
+where
+    for<'i> IdentRef<'i>: From<&'i I>,
+{
+    fn write(&mut self, ident: &I, value: &Value) -> bool {
+        self.tx.write(ident.into(), value, self.ctx)
     }
 }
 
-impl<'a, 'c> ExprEvalContext for TransactionContext<'a, 'c> {
-    fn read(&mut self, address: &Address) -> Option<&Value> {
-        self.tx.read(address, self.ctx)
+impl<'a, 'c, I> ExprEvalContext<I> for TransactionContext<'a, 'c>
+where
+    for<'i> IdentRef<'i>: From<&'i I>,
+{
+    fn read(&mut self, ident: &I) -> Option<&Value> {
+        self.tx.read(ident.into(), self.ctx)
     }
 }
 
-impl<'a, 'c> Resolver<UpgradeIdent> for TransactionContext<'a, 'c> {
-    fn resolve<'b>(&mut self, ident: &'b UpgradeIdent) -> Option<&'b Address> {
-        match ident {
-            UpgradeIdent::New(_) => todo!(),
-            UpgradeIdent::Existing(address) => Some(address),
+enum IdentRef<'a> {
+    New(&'a Name),
+    Existing(&'a VersionedAddress),
+}
+
+impl<'a> From<&'a VersionedAddress> for IdentRef<'a> {
+    fn from(value: &'a VersionedAddress) -> Self {
+        IdentRef::Existing(value)
+    }
+}
+
+impl<'a> From<&'a Ident> for IdentRef<'a> {
+    fn from(value: &'a Ident) -> Self {
+        match value {
+            Ident::New(new) => IdentRef::New(new),
+            Ident::Existing(existing) => IdentRef::Existing(existing),
         }
     }
 }

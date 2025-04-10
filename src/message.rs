@@ -31,6 +31,7 @@ pub enum Message {
     LockGranted {
         txid: TxId,
         address: Address,
+        version: Version,
         basis: BasisStamp,
         roots: HashSet<Address>,
     },
@@ -160,7 +161,7 @@ pub enum NodeConfiguration {
         value: StampedValue,
     },
     Definition {
-        expr: Expr,
+        expr: Expr<Address>,
         inputs: HashMap<Address, InputConfiguration>,
     },
 }

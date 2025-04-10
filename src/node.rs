@@ -11,7 +11,7 @@ use definition::Definition;
 use held_locks::{ExclusiveLockState, HeldLocks, SharedLockState};
 
 use crate::{
-    actor::{Actor, Address, Context},
+    actor::{Actor, Address, Context, Version},
     message::{BasisStamp, LockKind, Message, NodeConfiguration, StampedValue, TxId},
     value::Value,
 };
@@ -38,6 +38,8 @@ pub struct Node {
 
     /// The set of addresses to whom `Propagate` messages are sent whenever the value is changed.
     subscribers: HashSet<Address>,
+
+    version: Version,
 }
 
 impl Node {
@@ -90,6 +92,8 @@ impl Node {
                 };
 
                 self.update_value(new_value, None);
+
+                self.version = self.version.increment();
 
                 Some(ctx)
             }
@@ -179,6 +183,7 @@ impl Node {
                     address: ctx.me().clone(),
                     basis: self.value.basis.clone(),
                     roots: roots.clone(),
+                    version: self.version,
                 },
             );
         }

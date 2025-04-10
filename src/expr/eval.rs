@@ -1,31 +1,30 @@
 use std::mem;
 
-use crate::{actor::Address, value::Value};
+use crate::{
+    actor::{Address, VersionedAddress},
+    value::Value,
+};
 
-use super::{Action, Expr, Name, Upgrade, UpgradeIdent};
+use super::{Action, Expr, Ident, Name, Upgrade};
 
-pub trait UpgradeEvalContext: ActionEvalContext + Resolver<UpgradeIdent> {
-    fn var(&mut self, name: Name, replace: Option<Address>, value: Value);
-    fn def(&mut self, name: Name, replace: Option<Address>, expr: Expr);
-    fn del(&mut self, address: Address);
+pub trait UpgradeEvalContext: ActionEvalContext<Ident> {
+    fn var(&mut self, name: Name, replace: Option<VersionedAddress>, value: Value) -> bool;
+    fn def(&mut self, name: Name, replace: Option<VersionedAddress>, expr: Expr<Ident>) -> bool;
+    fn del(&mut self, address: VersionedAddress) -> bool;
 }
 
-pub trait ActionEvalContext: ExprEvalContext {
-    /// Attempts to write to the node referenced by `address` with the given `value`.
+pub trait ActionEvalContext<Ident = Address>: ExprEvalContext<Ident> {
+    /// Attempts to write to the node referenced by `ident` with the given `value`.
     ///
     /// Returns true if the write was performed.
-    fn write(&mut self, address: &Address, value: &Value) -> bool;
+    fn write(&mut self, ident: &Ident, value: &Value) -> bool;
 }
 
-pub trait ExprEvalContext {
-    /// Reads the value held by the node referenced by `address`.
+pub trait ExprEvalContext<Ident = Address> {
+    /// Reads the value held by the node referenced by `ident`.
     ///
     /// If the value is not yet ready, this function will return `None` instead of a value.
-    fn read(&mut self, address: &Address) -> Option<&Value>;
-}
-
-pub trait Resolver<Ident> {
-    fn resolve<'a>(&mut self, ident: &'a Ident) -> Option<&'a Address>;
+    fn read(&mut self, ident: &Ident) -> Option<&Value>;
 }
 
 impl Upgrade {
@@ -49,7 +48,9 @@ impl Upgrade {
                         unreachable!()
                     };
 
-                    ctx.var(name, replace, value);
+                    if !ctx.var(name, replace, value) {
+                        panic!("var was invalid")
+                    }
                 } else {
                     panic!("var expr could not be fully evaluated")
                 }
@@ -59,18 +60,18 @@ impl Upgrade {
                     unreachable!()
                 };
 
-                let Some(expr) = expr.resolve(ctx) else {
-                    panic!("def expr could not be fully resolved")
-                };
-
-                ctx.def(name, replace, expr);
+                if !ctx.def(name, replace, expr) {
+                    panic!("def was invalid")
+                }
             }
             Upgrade::Del(_) => {
                 let Upgrade::Del(address) = mem::replace(self, Upgrade::Nil) else {
                     unreachable!()
                 };
 
-                ctx.del(address);
+                if !ctx.del(address) {
+                    panic!("del was invalid")
+                }
             }
             Upgrade::Do(action) => {
                 action.eval(ctx);
@@ -82,7 +83,7 @@ impl Upgrade {
         }
     }
 
-    pub fn visit_writes(&self, mut visitor: impl FnMut(&UpgradeIdent, bool)) {
+    pub fn visit_writes(&self, mut visitor: impl FnMut(&Ident, bool)) {
         match self {
             Upgrade::Seq(a, b) => {
                 a.visit_writes(&mut visitor);
@@ -96,13 +97,19 @@ impl Upgrade {
         }
     }
 
-    pub fn visit_reads(&self, mut visitor: impl FnMut(&UpgradeIdent, bool)) {
+    pub fn visit_reads(&self, mut visitor: impl FnMut(&Ident, bool)) {
         match self {
             Upgrade::Seq(a, b) => {
                 a.visit_reads(&mut visitor);
                 b.visit_reads(&mut visitor);
             }
-            Upgrade::Var(..) | Upgrade::Def(..) | Upgrade::Del(..) => {}
+            Upgrade::Var(.., expr) => {
+                expr.visit_reads(visitor);
+            }
+            Upgrade::Def(.., expr) => {
+                expr.visit_reads(|ident, _definite| visitor(ident, false));
+            }
+            Upgrade::Del(..) => {}
             Upgrade::Do(action) => {
                 action.visit_writes(visitor);
             }
@@ -117,7 +124,7 @@ impl<Ident> Action<Ident> {
     /// When `self` is [`Action::Nil`], no further evaulation will be done.
     pub fn eval<C>(&mut self, ctx: &mut C)
     where
-        C: ActionEvalContext + Resolver<Ident>,
+        C: ActionEvalContext<Ident>,
     {
         match self {
             Action::Seq(a, b) => {
@@ -132,10 +139,8 @@ impl<Ident> Action<Ident> {
                 expr.eval(ctx);
 
                 if let Expr::Value(value) = expr {
-                    if let Some(address) = ctx.resolve(ident) {
-                        if ctx.write(address, value) {
-                            *self = Action::Nil;
-                        }
+                    if ctx.write(ident, value) {
+                        *self = Action::Nil;
                     }
                 }
             }
@@ -178,7 +183,7 @@ impl<Ident> Expr<Ident> {
     /// When `self` is an [`Expr::Value`], no further evaulation will be done.
     pub fn eval<C>(&mut self, ctx: &mut C)
     where
-        C: ExprEvalContext + Resolver<Ident>,
+        C: ExprEvalContext<Ident>,
     {
         match self {
             Expr::Tuple(items) => {
@@ -204,38 +209,11 @@ impl<Ident> Expr<Ident> {
                     *self = Expr::Value(Value::Tuple(values.into_boxed_slice()))
                 }
             }
-            Expr::Read(ident) => match ctx.resolve(ident) {
-                Some(address) => match ctx.read(address) {
-                    Some(value) => *self = Expr::Value(value.clone()),
-                    None => (),
-                },
+            Expr::Read(ident) => match ctx.read(ident) {
+                Some(value) => *self = Expr::Value(value.clone()),
                 None => (),
             },
             Expr::Value(_) => (),
-        }
-    }
-
-    fn resolve<C>(self, ctx: &mut C) -> Option<Expr>
-    where
-        C: Resolver<Ident>,
-    {
-        match self {
-            Expr::Tuple(items) => {
-                let mut resolved = Vec::with_capacity(items.len());
-                for item in items {
-                    let Some(item) = item.resolve(ctx) else {
-                        return None;
-                    };
-                    resolved.push(item);
-                }
-
-                Some(Expr::Tuple(resolved.into_boxed_slice()))
-            }
-            Expr::Read(ident) => match ctx.resolve(&ident) {
-                Some(address) => Some(Expr::Read(address.clone())),
-                None => None,
-            },
-            Expr::Value(value) => Some(Expr::Value(value)),
         }
     }
 
@@ -250,11 +228,5 @@ impl<Ident> Expr<Ident> {
             Expr::Read(ident) => visitor(ident, true),
             Expr::Value(_) => (),
         }
-    }
-}
-
-impl<C> Resolver<Address> for C {
-    fn resolve<'a>(&mut self, ident: &'a Address) -> Option<&'a Address> {
-        Some(ident)
     }
 }

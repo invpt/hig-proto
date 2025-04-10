@@ -9,7 +9,7 @@ use crate::{
 
 pub struct Definition {
     inputs: HashMap<Address, Input>,
-    expr: Expr,
+    expr: Expr<Address>,
 }
 
 struct Input {
@@ -22,7 +22,7 @@ struct EvalContext<'a>(&'a HashMap<Address, Input>);
 
 impl Definition {
     pub fn new(
-        expr: Expr,
+        expr: Expr<Address>,
         inputs: impl IntoIterator<Item = (Address, InputConfiguration)>,
     ) -> (Definition, StampedValue) {
         let definition = Definition {
@@ -49,7 +49,7 @@ impl Definition {
 
     pub fn reconfigure(
         &mut self,
-        new_expr: Expr,
+        new_expr: Expr<Address>,
         new_inputs: impl IntoIterator<Item = (Address, InputConfiguration)>,
     ) -> StampedValue {
         self.expr = new_expr;
