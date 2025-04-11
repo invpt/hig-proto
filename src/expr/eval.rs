@@ -8,9 +8,9 @@ use crate::{
 use super::{Action, Expr, Ident, Name, Upgrade};
 
 pub trait UpgradeEvalContext: ActionEvalContext<Ident> {
-    fn var(&mut self, name: Name, replace: Option<VersionedAddress>, value: Value) -> bool;
-    fn def(&mut self, name: Name, replace: Option<VersionedAddress>, expr: Expr<Ident>) -> bool;
-    fn del(&mut self, address: VersionedAddress) -> bool;
+    fn var(&mut self, ident: Ident, value: Value);
+    fn def(&mut self, ident: Ident, expr: Expr<Ident>);
+    fn del(&mut self, address: VersionedAddress);
 }
 
 pub trait ActionEvalContext<Ident = Address>: ExprEvalContext<Ident> {
@@ -38,40 +38,33 @@ impl Upgrade {
                     *self = mem::replace(b, Upgrade::Nil);
                 }
             }
-            Upgrade::Var(_, _, expr) => {
+            Upgrade::Var(_, expr) => {
                 expr.eval(ctx);
 
                 if let Expr::Value(_) = expr {
-                    let Upgrade::Var(name, replace, Expr::Value(value)) =
-                        mem::replace(self, Upgrade::Nil)
+                    let Upgrade::Var(ident, Expr::Value(value)) = mem::replace(self, Upgrade::Nil)
                     else {
                         unreachable!()
                     };
 
-                    if !ctx.var(name, replace, value) {
-                        panic!("var was invalid")
-                    }
+                    ctx.var(ident, value);
                 } else {
                     panic!("var expr could not be fully evaluated")
                 }
             }
             Upgrade::Def(..) => {
-                let Upgrade::Def(name, replace, expr) = mem::replace(self, Upgrade::Nil) else {
+                let Upgrade::Def(ident, expr) = mem::replace(self, Upgrade::Nil) else {
                     unreachable!()
                 };
 
-                if !ctx.def(name, replace, expr) {
-                    panic!("def was invalid")
-                }
+                ctx.def(ident, expr);
             }
             Upgrade::Del(_) => {
                 let Upgrade::Del(address) = mem::replace(self, Upgrade::Nil) else {
                     unreachable!()
                 };
 
-                if !ctx.del(address) {
-                    panic!("del was invalid")
-                }
+                ctx.del(address);
             }
             Upgrade::Do(action) => {
                 action.eval(ctx);
@@ -89,8 +82,8 @@ impl Upgrade {
                 a.visit_upgrades(&mut visitor);
                 b.visit_upgrades(&mut visitor);
             }
-            Upgrade::Var(_, Some(address), _) => visitor(address),
-            Upgrade::Def(_, Some(address), _) => visitor(address),
+            Upgrade::Var(Ident::Existing(address), _) => visitor(address),
+            Upgrade::Def(Ident::Existing(address), _) => visitor(address),
             Upgrade::Del(address) => visitor(address),
             _ => {}
         }

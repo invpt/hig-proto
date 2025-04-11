@@ -1,11 +1,7 @@
 mod definition;
 mod held_locks;
 
-use std::{
-    collections::{btree_map, BTreeMap, HashMap, HashSet},
-    mem,
-    sync::Arc,
-};
+use std::collections::{btree_map, BTreeMap, HashSet};
 
 use definition::Definition;
 use held_locks::{ExclusiveLockState, HeldLocks, SharedLockState};
@@ -13,7 +9,6 @@ use held_locks::{ExclusiveLockState, HeldLocks, SharedLockState};
 use crate::{
     actor::{Actor, Address, Context, Version},
     message::{BasisStamp, LockKind, Message, NodeConfiguration, StampedValue, TxId},
-    value::Value,
 };
 
 pub struct Node {
@@ -21,6 +16,7 @@ pub struct Node {
     /// youngest, thanks to the use of BTreeMap. The ordering makes it easy to pick the highest-
     /// priority transaction for Wound-Wait.
     queued: BTreeMap<TxId, LockKind>,
+
     /// The set of locks currently held.
     held: HeldLocks,
 

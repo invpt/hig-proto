@@ -28,8 +28,7 @@ struct Transaction {
     may_write: HashSet<Address>,
     pending_locks: HashSet<Address>,
     locks: HashMap<Address, Lock>,
-    new_nodes: HashMap<Name, NewNode>,
-    deleted_nodes: HashMap<Address, Version>,
+    nodes: HashMap<Ident, Node>,
 }
 
 enum TransactionKind {
@@ -55,9 +54,15 @@ enum ReadRequest {
     Pending,
 }
 
-enum NewNode {
-    Var(Option<VersionedAddress>, Value),
-    Def(Option<VersionedAddress>, Expr<Ident>, Option<Expr<Ident>>),
+struct UpdatedNode {
+    version: Version,
+    node: Node,
+}
+
+enum Node {
+    Var(Value),
+    Def(Expr<Ident>, Option<Expr<Ident>>),
+    Del,
 }
 
 #[derive(Debug)]
@@ -86,8 +91,7 @@ impl Manager {
             may_write: HashSet::new(),
             pending_locks: HashSet::new(),
             locks: HashMap::new(),
-            new_nodes: HashMap::new(),
-            deleted_nodes: HashMap::new(),
+            nodes: HashMap::new(),
         };
 
         self.transactions.insert(txid.clone(), tx);
@@ -296,144 +300,137 @@ impl Transaction {
         None
     }
 
-    fn write(&mut self, ident: IdentRef, value: &Value, ctx: &Context) -> bool {
-        match ident {
-            IdentRef::New(name) => {
-                let node = self
-                    .new_nodes
-                    .get_mut(name)
-                    .expect("can't write to nonexistent node");
+    fn write(&mut self, ident: Ident, value: &Value, ctx: &Context) -> bool {
+        if let Some(node) = self.nodes.get_mut(&ident) {
+            match node {
+                Node::Var(current_value) => {
+                    *current_value = value.clone();
 
-                let NewNode::Var(_, current_value) = node else {
-                    panic!("can't write to definition")
-                };
-
-                *current_value = value.clone();
-
-                true
-            }
-            IdentRef::Existing(address) => {
-                let Some(lock) = self
-                    .lock_versioned(&address, LockKind::Exclusive, ctx)
-                    .expect("invalid version (TODO: don't panic)")
-                else {
-                    // cannot perform this write until the variable is locked
-                    return false;
-                };
-
-                if let LockValue::None(ReadRequest::Pending) = lock.value {
-                    // cannot perform this write until we have gotten the value back
-                    return false;
+                    return true;
                 }
-
-                if let LockValue::None(ReadRequest::None) = lock.value {
-                    let own_iteration = lock.basis.latest(&address.address);
-                    lock.basis = BasisStamp::empty();
-                    lock.basis.add(address.address.clone(), own_iteration);
-                }
-
-                lock.value = LockValue::Some(value.clone());
-                lock.wrote = true;
-
-                ctx.send(
-                    &address.address,
-                    Message::Write {
-                        txid: self.id.clone(),
-                        value: value.clone(),
-                    },
-                );
-
-                true
+                Node::Def(..) => panic!("can't write to def"),
+                Node::Del => {}
             }
         }
+
+        let Ident::Existing(address) = ident else {
+            panic!("node not found")
+        };
+
+        let Some(lock) = self
+            .lock_versioned(&address, LockKind::Exclusive, ctx)
+            .expect("invalid version (TODO: don't panic)")
+        else {
+            // cannot perform this write until the variable is locked
+            return false;
+        };
+
+        if let LockValue::None(ReadRequest::Pending) = lock.value {
+            // cannot perform this write until we have gotten the value back
+            return false;
+        }
+
+        if let LockValue::None(ReadRequest::None) = lock.value {
+            let own_iteration = lock.basis.latest(&address.address);
+            lock.basis = BasisStamp::empty();
+            lock.basis.add(address.address.clone(), own_iteration);
+        }
+
+        lock.value = LockValue::Some(value.clone());
+        lock.wrote = true;
+
+        ctx.send(
+            &address.address,
+            Message::Write {
+                txid: self.id.clone(),
+                value: value.clone(),
+            },
+        );
+
+        true
     }
 
-    fn read(&mut self, ident: IdentRef, directory: &Directory, ctx: &Context) -> Option<&Value> {
-        match ident {
-            IdentRef::New(name) => {
-                let node = self
-                    .new_nodes
-                    .get_mut(name)
-                    .expect("can't write to nonexistent node");
-
-                match node {
-                    NewNode::Var(_, _value_that_is_exactly_what_we_need) => {
-                        // polonius when... T~T
-                        let NewNode::Var(_, value) = self.new_nodes.get(name).unwrap() else {
-                            unreachable!()
-                        };
-
-                        Some(value)
-                    }
-                    NewNode::Def(_, expr, computation) => {
-                        let mut computation = computation.take().unwrap_or_else(|| expr.clone());
-
-                        computation.eval(&mut TransactionContext {
-                            tx: self,
-                            directory,
-                            ctx,
-                        });
-
-                        let NewNode::Def(_, _, slot) = self.new_nodes.get_mut(name).unwrap() else {
-                            unreachable!()
-                        };
-
-                        if let Expr::Value(value) = slot.insert(computation) {
-                            Some(value)
-                        } else {
-                            None
-                        }
-                    }
-                }
-            }
-            IdentRef::Existing(address) => {
-                let Some(lock) = self
-                    .lock_versioned(&address, LockKind::Shared, ctx)
-                    .expect("invalid version (TODO: don't panic)")
-                else {
-                    // cannot perform this read until the variable is locked
-                    return None;
-                };
-
-                if let LockValue::Some(_value_that_is_exactly_what_we_need) = &lock.value {
-                    // can't use _value_that_is_exactly_what_we_need because rust is dumb without Polonius
-                    // this incantation grabs a fresh reference exactly equal to _value_that_is_exactly_what_we_need...
-                    let LockValue::Some(value) = &self.locks.get(&address.address).unwrap().value
-                    else {
+    fn read(&mut self, ident: Ident, directory: &Directory, ctx: &Context) -> Option<&Value> {
+        if let Some(node) = self.nodes.get_mut(&ident) {
+            match node {
+                Node::Var(_value_that_is_exactly_what_we_need) => {
+                    // po. lo. ni. us.
+                    let Some(Node::Var(value)) = self.nodes.get(&ident) else {
                         unreachable!()
                     };
 
-                    // we already have a value
                     return Some(value);
                 }
+                Node::Def(expr, computation) => {
+                    let mut computation = computation.take().unwrap_or_else(|| expr.clone());
+                    computation.eval(&mut TransactionContext {
+                        tx: self,
+                        directory,
+                        ctx,
+                    });
 
-                if let LockValue::None(ReadRequest::None) = &lock.value {
-                    let mut basis = BasisStamp::empty();
-                    for root_address in lock.roots.clone() {
-                        let Some(lock) = self.lock(&root_address, LockKind::Shared, ctx) else {
-                            // cannot perform this read until this ancestor is locked
-                            return None;
-                        };
+                    let Some(Node::Def(_, slot)) = self.nodes.get_mut(&ident) else {
+                        unreachable!()
+                    };
 
-                        let latest = lock.basis.latest(&root_address);
-                        basis.add(root_address, latest);
+                    if let Expr::Value(value) = slot.insert(computation) {
+                        return Some(value);
+                    } else {
+                        return None;
                     }
-
-                    ctx.send(
-                        &address.address,
-                        Message::Read {
-                            txid: self.id.clone(),
-                            basis,
-                        },
-                    );
-
-                    self.locks.get_mut(&address.address).unwrap().value =
-                        LockValue::None(ReadRequest::Pending);
                 }
-
-                None
+                Node::Del => {}
             }
         }
+
+        let Ident::Existing(address) = ident else {
+            panic!("node not found")
+        };
+
+        let Some(lock) = self
+            .lock_versioned(&address, LockKind::Shared, ctx)
+            .expect("invalid version (TODO: don't panic)")
+        else {
+            // cannot perform this read until the variable is locked
+            return None;
+        };
+
+        if let LockValue::Some(_value_that_is_exactly_what_we_need) = &lock.value {
+            // can't use _value_that_is_exactly_what_we_need because rust is dumb without Polonius
+            // this incantation grabs a fresh reference exactly equal to _value_that_is_exactly_what_we_need...
+            let LockValue::Some(value) = &self.locks.get(&address.address).unwrap().value else {
+                unreachable!()
+            };
+
+            // we already have a value
+            return Some(value);
+        }
+
+        if let LockValue::None(ReadRequest::None) = &lock.value {
+            let mut basis = BasisStamp::empty();
+            for root_address in lock.roots.clone() {
+                let Some(lock) = self.lock(&root_address, LockKind::Shared, ctx) else {
+                    // cannot perform this read until this ancestor is locked
+                    return None;
+                };
+
+                let latest = lock.basis.latest(&root_address);
+                basis.add(root_address, latest);
+            }
+
+            ctx.send(
+                &address.address,
+                Message::Read {
+                    txid: self.id.clone(),
+                    basis,
+                },
+            );
+
+            self.locks.get_mut(&address.address).unwrap().value =
+                LockValue::None(ReadRequest::Pending);
+        }
+
+        None
     }
 }
 
@@ -444,91 +441,47 @@ struct TransactionContext<'a, 'c> {
 }
 
 impl<'a, 'c> UpgradeEvalContext for TransactionContext<'a, 'c> {
-    fn var(&mut self, name: Name, replace: Option<VersionedAddress>, value: Value) -> bool {
-        if let Some(address) = &replace {
-            if !self
-                .directory
-                .get(&name)
-                .any(|known_address| known_address == *address)
-            {
-                return false;
-            }
-        } else if self.directory.get(&name).count() > 0 {
-            return false;
+    fn var(&mut self, ident: Ident, value: Value) {
+        if self.tx.nodes.contains_key(&ident) {
+            panic!("cannot redefine existing node")
         }
 
-        self.tx.new_nodes.insert(name, NewNode::Var(replace, value));
+        if let Ident::New(name) = &ident {
+            if self.directory.get(name).count() > 0 {
+                panic!("cannot redefine existing node")
+            }
+        }
 
-        true
+        self.tx.nodes.insert(ident, Node::Var(value));
     }
 
-    fn def(&mut self, name: Name, replace: Option<VersionedAddress>, expr: Expr<Ident>) -> bool {
-        if let Some(address) = &replace {
-            if !self
-                .directory
-                .get(&name)
-                .any(|known_address| known_address == *address)
-            {
-                return false;
-            }
-        } else if self.directory.get(&name).count() > 0 {
-            return false;
+    fn def(&mut self, ident: Ident, expr: Expr<Ident>) {
+        if self.tx.nodes.contains_key(&ident) {
+            panic!("cannot redefine existing node")
         }
 
-        self.tx
-            .new_nodes
-            .insert(name, NewNode::Def(replace, expr, None));
+        if let Ident::New(name) = &ident {
+            if self.directory.get(name).count() > 0 {
+                panic!("cannot redefine existing node")
+            }
+        }
 
-        true
+        self.tx.nodes.insert(ident, Node::Def(expr, None));
     }
 
-    fn del(&mut self, address: VersionedAddress) -> bool {
-        if self.directory.has(&address) {
-            self.tx
-                .deleted_nodes
-                .insert(address.address, address.version);
-
-            true
-        } else {
-            false
-        }
+    fn del(&mut self, address: VersionedAddress) {
+        self.tx.nodes.insert(Ident::Existing(address), Node::Del);
     }
 }
 
-impl<'a, 'c, I> ActionEvalContext<I> for TransactionContext<'a, 'c>
-where
-    for<'i> IdentRef<'i>: From<&'i I>,
-{
+impl<'a, 'c, I: Clone + Into<Ident>> ActionEvalContext<I> for TransactionContext<'a, 'c> {
     fn write(&mut self, ident: &I, value: &Value) -> bool {
-        self.tx.write(ident.into(), value, self.ctx)
+        self.tx.write(ident.clone().into(), value, self.ctx)
     }
 }
 
-impl<'a, 'c, I> ExprEvalContext<I> for TransactionContext<'a, 'c>
-where
-    for<'i> IdentRef<'i>: From<&'i I>,
-{
+impl<'a, 'c, I: Clone + Into<Ident>> ExprEvalContext<I> for TransactionContext<'a, 'c> {
     fn read(&mut self, ident: &I) -> Option<&Value> {
-        self.tx.read(ident.into(), self.directory, self.ctx)
-    }
-}
-
-enum IdentRef<'a> {
-    New(&'a Name),
-    Existing(&'a VersionedAddress),
-}
-
-impl<'a> From<&'a VersionedAddress> for IdentRef<'a> {
-    fn from(value: &'a VersionedAddress) -> Self {
-        IdentRef::Existing(value)
-    }
-}
-
-impl<'a> From<&'a Ident> for IdentRef<'a> {
-    fn from(value: &'a Ident) -> Self {
-        match value {
-            Ident::New(new) => IdentRef::New(new),
-            Ident::Existing(existing) => IdentRef::Existing(existing),
-        }
+        self.tx.read(ident.clone().into(), self.directory, self.ctx)
     }
 }

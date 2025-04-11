@@ -13,11 +13,8 @@ pub struct Name {
 #[derive(Clone)]
 pub enum Upgrade {
     Seq(Box<Upgrade>, Box<Upgrade>),
-    // NOTE: Var and Def always take names, since there's no way to predetermine the address for new or updated nodes.
-    // They also take an optional address, which is used to update an existing node.
-    Var(Name, Option<VersionedAddress>, Expr<Ident>),
-    Def(Name, Option<VersionedAddress>, Expr<Ident>),
-    // NOTE: on the other hand, since only preexisting nodes can be deleted (and newly-created ones cannot be), Del takes an address.
+    Var(Ident, Expr<Ident>),
+    Def(Ident, Expr<Ident>),
     Del(VersionedAddress),
     Do(Action<Ident>),
     Nil,
@@ -28,6 +25,12 @@ pub enum Upgrade {
 pub enum Ident {
     New(Name),
     Existing(VersionedAddress),
+}
+
+impl From<VersionedAddress> for Ident {
+    fn from(value: VersionedAddress) -> Self {
+        Ident::Existing(value)
+    }
 }
 
 #[derive(Clone)]
