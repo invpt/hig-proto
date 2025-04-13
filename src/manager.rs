@@ -39,7 +39,7 @@ impl Manager {
         let tx = Transaction::new(txid.clone(), TransactionKind::Action(action));
 
         self.transactions
-            .entry(txid.clone())
+            .entry(txid)
             .insert_entry(tx)
             .get_mut()
             .eval(&self.directory, ctx);

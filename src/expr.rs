@@ -13,7 +13,6 @@ pub enum Upgrade {
     Var(Ident, Expr<Ident>),
     Def(Ident, Expr<Ident>),
     Del(VersionedAddress),
-    Do(Action<Ident>),
     Nil,
     // NOTE: control flow for upgrades is not planned
 }

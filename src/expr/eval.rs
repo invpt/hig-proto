@@ -5,7 +5,7 @@ use crate::{
     expr::Value,
 };
 
-use super::{Action, Expr, Ident, Name, Upgrade};
+use super::{Action, Expr, Ident, Upgrade};
 
 pub trait UpgradeEvalContext: ActionEvalContext<Ident> {
     fn var(&mut self, ident: Ident, value: Value);
@@ -66,12 +66,6 @@ impl Upgrade {
 
                 ctx.del(address);
             }
-            Upgrade::Do(action) => {
-                action.eval(ctx);
-                if let Action::Nil = action {
-                    *self = Upgrade::Nil
-                }
-            }
             Upgrade::Nil => {}
         }
     }
@@ -89,20 +83,6 @@ impl Upgrade {
         }
     }
 
-    pub fn visit_writes(&self, mut visitor: impl FnMut(&Ident, bool)) {
-        match self {
-            Upgrade::Seq(a, b) => {
-                a.visit_writes(&mut visitor);
-                b.visit_writes(&mut visitor);
-            }
-            Upgrade::Var(..) | Upgrade::Def(..) | Upgrade::Del(..) => {}
-            Upgrade::Do(action) => {
-                action.visit_writes(visitor);
-            }
-            Upgrade::Nil => {}
-        }
-    }
-
     pub fn visit_reads(&self, mut visitor: impl FnMut(&Ident, bool)) {
         match self {
             Upgrade::Seq(a, b) => {
@@ -116,9 +96,6 @@ impl Upgrade {
                 expr.visit_reads(|ident, _definite| visitor(ident, false));
             }
             Upgrade::Del(..) => {}
-            Upgrade::Do(action) => {
-                action.visit_writes(visitor);
-            }
             Upgrade::Nil => {}
         }
     }
@@ -168,7 +145,7 @@ impl<Ident> Action<Ident> {
         }
     }
 
-    /// Traverses the expression, calling the callback with each Ident the Action might read from.
+    /// Traverses the action, calling the callback with each Ident the Action might read from.
     pub fn visit_reads(&self, mut visitor: impl FnMut(&Ident, bool)) {
         match self {
             Action::Seq(a, b) => {

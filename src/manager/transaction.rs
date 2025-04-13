@@ -101,21 +101,6 @@ impl Transaction {
                         .expect("invalid version (TODO: don't panic)");
                 });
 
-                self.state.may_write.clear();
-                upgrade.visit_writes(|ident, definite| {
-                    let Ident::Existing(address) = ident else {
-                        return;
-                    };
-
-                    if definite {
-                        self.state
-                            .lock_versioned(address, LockKind::Exclusive, ctx)
-                            .expect("invalid version (TODO: don't panic)");
-                    } else {
-                        self.state.may_write.insert(address.address.clone());
-                    }
-                });
-
                 upgrade.eval(&mut EvalContext {
                     state: &mut self.state,
                     directory,
@@ -193,7 +178,7 @@ impl Transaction {
 }
 
 impl TransactionState {
-    pub fn new(id: TxId) -> TransactionState {
+    fn new(id: TxId) -> TransactionState {
         TransactionState {
             id,
             may_write: HashSet::new(),
