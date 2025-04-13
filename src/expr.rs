@@ -1,7 +1,4 @@
-use crate::{
-    actor::{Address, VersionedAddress},
-    value::Value,
-};
+use crate::actor::VersionedAddress;
 
 pub mod eval;
 
@@ -47,4 +44,30 @@ pub enum Action<Ident = VersionedAddress> {
     Write(Ident, Expr<Ident>),
     Nil,
     // TODO: control flow
+}
+
+#[derive(Debug, Clone)]
+pub enum Value {
+    Tuple(Box<[Value]>),
+    Integer(isize),
+}
+
+impl Value {
+    pub fn compute_type(&self) -> Type {
+        match self {
+            Value::Tuple(items) => Type::Tuple(
+                items
+                    .iter()
+                    .map(|item| item.compute_type())
+                    .collect::<Box<[_]>>(),
+            ),
+            Value::Integer(_) => Type::Integer,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Type {
+    Tuple(Box<[Type]>),
+    Integer,
 }

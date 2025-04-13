@@ -10,11 +10,6 @@ pub struct Directory {
     state: DirectoryState,
 }
 
-pub enum DirectoryEvent {
-    Unhandled(Message),
-    UpdatedState,
-}
-
 impl Directory {
     pub fn new(seed_peers: impl Iterator<Item = Address>) -> Directory {
         Directory {
@@ -29,17 +24,7 @@ impl Directory {
         self.state.managers.insert(ctx.me().clone(), false);
     }
 
-    pub fn handle(&mut self, message: Message, ctx: &Context) -> DirectoryEvent {
-        match message {
-            Message::Directory { state } => {
-                self.merge_and_update(state, ctx);
-                DirectoryEvent::UpdatedState
-            }
-            _ => DirectoryEvent::Unhandled(message),
-        }
-    }
-
-    fn merge_and_update(&mut self, new_state: DirectoryState, ctx: &Context) {
+    pub fn merge_and_update(&mut self, new_state: DirectoryState, ctx: &Context) {
         let mut new_peers = Vec::new();
 
         for (peer, deleted) in new_state.managers {
@@ -137,11 +122,9 @@ impl Directory {
                 }
             },
         }
-
-        self.disseminate_state(ctx);
     }
 
-    pub fn delete(&mut self, address: VersionedAddress, ctx: &Context) -> bool {
+    pub fn delete(&mut self, address: VersionedAddress) -> bool {
         let instances = self
             .state
             .nodes
@@ -156,10 +139,6 @@ impl Directory {
             deleted = true;
         }
 
-        if deleted {
-            self.disseminate_state(ctx);
-        }
-
         deleted
     }
 
@@ -171,7 +150,7 @@ impl Directory {
             .any(|v| *v == Some(address.version))
     }
 
-    fn disseminate_state(&self, ctx: &Context) {
+    pub fn disseminate_state(&self, ctx: &Context) {
         for (peer, removed) in &self.state.managers {
             if *removed || peer == ctx.me() {
                 continue;

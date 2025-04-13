@@ -2,9 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     actor::Address,
-    expr::{eval::ExprEvalContext, Expr},
+    expr::{eval::ExprEvalContext, Expr, Value},
     message::{BasisStamp, InputConfiguration, StampedValue},
-    value::Value,
 };
 
 pub struct Definition {

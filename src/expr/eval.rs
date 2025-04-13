@@ -2,7 +2,7 @@ use std::mem;
 
 use crate::{
     actor::{Address, VersionedAddress},
-    value::Value,
+    expr::Value,
 };
 
 use super::{Action, Expr, Ident, Name, Upgrade};

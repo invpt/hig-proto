@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::{
     actor::{Address, Context},
+    expr::Value,
     message::{Message, NodeConfiguration, TxId},
-    value::Value,
 };
 
 pub enum HeldLocks {

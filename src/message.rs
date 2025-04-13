@@ -6,8 +6,7 @@ use std::{
 
 use crate::{
     actor::{Address, Version},
-    expr::{Action, Expr, Name, Upgrade},
-    value::Value,
+    expr::{Action, Expr, Name, Upgrade, Value},
 };
 
 #[derive(Clone)]
