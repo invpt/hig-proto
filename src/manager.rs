@@ -58,13 +58,13 @@ impl Actor for Manager {
             Message::LockGranted {
                 txid,
                 address,
-                basis,
-                roots,
+                node_kind,
                 version,
+                type_,
             } => {
                 let tx = self.transactions.get_mut(&txid).unwrap();
 
-                tx.lock_granted(address, version, basis, roots);
+                tx.lock_granted(address, version, node_kind, type_);
 
                 tx.eval(&self.directory, &ctx);
             }

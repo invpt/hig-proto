@@ -4,9 +4,9 @@ use crate::{
     actor::{Address, Context, Version, VersionedAddress},
     expr::{
         eval::{ActionEvalContext, ExprEvalContext, UpgradeEvalContext},
-        Action, Expr, Ident, Upgrade, Value,
+        Action, Expr, Ident, Type, Upgrade, Value,
     },
-    message::{BasisStamp, LockKind, Message, TxId},
+    message::{Ancestor, BasisStamp, LockKind, Message, NodeKind, StampedValue, TxId},
 };
 
 use super::directory::Directory;
@@ -32,14 +32,14 @@ struct TransactionState {
 struct Lock {
     value: LockValue,
     wrote: bool,
-    basis: BasisStamp,
-    roots: HashSet<Address>,
     version: Version,
+    node_kind: NodeKind,
+    type_: Type,
 }
 
 enum LockValue {
     None(ReadRequest),
-    Some(Value),
+    Some(StampedValue),
 }
 
 enum ReadRequest {
@@ -106,6 +106,10 @@ impl Transaction {
                     directory,
                     ctx,
                 });
+
+                if let Upgrade::Nil = upgrade {
+                    self.process_upgrade(directory, ctx);
+                }
             }
         }
     }
@@ -117,8 +121,8 @@ impl Transaction {
             .locks
             .values()
             .fold(BasisStamp::empty(), |mut basis, lock| {
-                if let LockValue::Some(..) = lock.value {
-                    basis.merge_from(&lock.basis);
+                if let LockValue::Some(value) = &lock.value {
+                    basis.merge_from(&value.basis);
                 }
 
                 basis
@@ -135,12 +139,17 @@ impl Transaction {
         }
     }
 
+    fn process_upgrade(&mut self, directory: &Directory, ctx: &Context) {
+        _ = directory;
+        _ = ctx;
+    }
+
     pub fn lock_granted(
         &mut self,
         address: Address,
         version: Version,
-        basis: BasisStamp,
-        roots: HashSet<Address>,
+        node_kind: NodeKind,
+        type_: Type,
     ) {
         let Some(expected_version) = self.state.pending_locks.remove(&address) else {
             panic!("we were granted a lock we did not request")
@@ -157,14 +166,14 @@ impl Transaction {
             Lock {
                 value: LockValue::None(ReadRequest::None),
                 wrote: false,
-                basis,
-                roots,
+                node_kind,
                 version,
+                type_,
             },
         );
     }
 
-    pub fn read_result(&mut self, address: Address, value: Value) {
+    pub fn read_result(&mut self, address: Address, value: StampedValue) {
         let lock = self
             .state
             .locks
@@ -270,18 +279,25 @@ impl TransactionState {
             return false;
         };
 
-        if let LockValue::None(ReadRequest::Pending) = lock.value {
-            // cannot perform this write until we have gotten the value back
-            return false;
-        }
+        let NodeKind::Variable { iteration } = lock.node_kind else {
+            panic!("tried to write to non-variable")
+        };
 
-        if let LockValue::None(ReadRequest::None) = lock.value {
-            let own_iteration = lock.basis.latest(&address.address);
-            lock.basis = BasisStamp::empty();
-            lock.basis.add(address.address.clone(), own_iteration);
-        }
+        let mut basis = match &lock.value {
+            // cannot perform this write until we have gotten the value back from the read
+            LockValue::None(ReadRequest::Pending) => return false,
 
-        lock.value = LockValue::Some(value.clone());
+            LockValue::None(ReadRequest::None) => BasisStamp::empty(),
+            LockValue::Some(value) => value.basis.clone(),
+        };
+
+        basis.add(address.address.clone(), iteration);
+
+        lock.value = LockValue::Some(StampedValue {
+            value: value.clone(),
+            basis,
+        });
+
         lock.wrote = true;
 
         ctx.send(
@@ -348,19 +364,30 @@ impl TransactionState {
             };
 
             // we already have a value
-            return Some(value);
+            return Some(&value.value);
         }
 
         if let LockValue::None(ReadRequest::None) = &lock.value {
             let mut basis = BasisStamp::empty();
-            for root_address in lock.roots.clone() {
-                let Some(lock) = self.lock(&root_address, LockKind::Shared, ctx) else {
-                    // cannot perform this read until this ancestor is locked
-                    return None;
-                };
 
-                let latest = lock.basis.latest(&root_address);
-                basis.add(root_address, latest);
+            if let NodeKind::Definition { ancestors } = &lock.node_kind {
+                for root_address in ancestors
+                    .iter()
+                    .filter(|(_, a)| a.is_root)
+                    .map(|(a, _)| a.clone())
+                    .collect::<Vec<_>>()
+                {
+                    let Some(lock) = self.lock(&root_address, LockKind::Shared, ctx) else {
+                        // cannot perform this read until this ancestor is locked
+                        return None;
+                    };
+
+                    let NodeKind::Variable { iteration } = lock.node_kind else {
+                        panic!("non-variable was marked as root")
+                    };
+
+                    basis.add(root_address.clone(), iteration);
+                }
             }
 
             ctx.send(
@@ -413,8 +440,8 @@ impl<'a, 'c> UpgradeEvalContext for EvalContext<'a, 'c> {
     }
 }
 
-impl<'a, 'c, I: Clone + Into<Ident>> ActionEvalContext<I> for EvalContext<'a, 'c> {
-    fn write(&mut self, ident: &I, value: &Value) -> bool {
+impl<'a, 'c> ActionEvalContext for EvalContext<'a, 'c> {
+    fn write(&mut self, ident: &VersionedAddress, value: &Value) -> bool {
         self.state.write(ident.clone().into(), value, self.ctx)
     }
 }

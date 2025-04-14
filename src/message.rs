@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     actor::{Address, Version},
-    expr::{Action, Expr, Name, Upgrade, Value},
+    expr::{Action, Expr, Name, Type, Upgrade, Value},
 };
 
 #[derive(Clone)]
@@ -31,8 +31,8 @@ pub enum Message {
         txid: TxId,
         address: Address,
         version: Version,
-        basis: BasisStamp,
-        roots: HashSet<Address>,
+        node_kind: NodeKind,
+        type_: Type,
     },
 
     // transaction - messages available to shared and exclusive locks
@@ -43,7 +43,7 @@ pub enum Message {
     ReadResult {
         txid: TxId,
         address: Address,
-        value: Value,
+        value: StampedValue,
     },
     UpdateSubscriptions {
         txid: TxId,
@@ -84,6 +84,16 @@ pub enum Message {
     },
     Directory {
         state: DirectoryState,
+    },
+}
+
+#[derive(Clone)]
+pub enum NodeKind {
+    Variable {
+        iteration: Iteration,
+    },
+    Definition {
+        ancestors: HashMap<Address, Ancestor>,
     },
 }
 
@@ -133,9 +143,13 @@ impl BasisStamp {
         }
     }
 
-    pub fn prec_eq_wrt_roots(&self, other: &BasisStamp, roots: &HashSet<Address>) -> bool {
-        for root in roots {
-            if self.latest(root) > other.latest(root) {
+    pub fn prec_eq_wrt_ancestors(
+        &self,
+        other: &BasisStamp,
+        ancestors: &HashMap<Address, Ancestor>,
+    ) -> bool {
+        for ancestor in ancestors.keys() {
+            if self.latest(ancestor) > other.latest(ancestor) {
                 return false;
             }
         }
@@ -167,8 +181,13 @@ pub enum NodeConfiguration {
 
 #[derive(Clone)]
 pub struct InputConfiguration {
-    pub roots: HashSet<Address>,
+    pub ancestors: HashMap<Address, Ancestor>,
     pub value: StampedValue,
+}
+
+#[derive(Clone)]
+pub struct Ancestor {
+    pub is_root: bool,
 }
 
 #[derive(Clone)]

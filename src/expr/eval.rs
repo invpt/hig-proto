@@ -7,17 +7,17 @@ use crate::{
 
 use super::{Action, Expr, Ident, Upgrade};
 
-pub trait UpgradeEvalContext: ActionEvalContext<Ident> {
+pub trait UpgradeEvalContext: ExprEvalContext<Ident> {
     fn var(&mut self, ident: Ident, value: Value);
     fn def(&mut self, ident: Ident, expr: Expr<Ident>);
     fn del(&mut self, address: VersionedAddress);
 }
 
-pub trait ActionEvalContext<Ident = Address>: ExprEvalContext<Ident> {
-    /// Attempts to write to the node referenced by `ident` with the given `value`.
+pub trait ActionEvalContext: ExprEvalContext<VersionedAddress> {
+    /// Attempts to write to the node referenced by `address` with the given `value`.
     ///
     /// Returns true if the write was performed.
-    fn write(&mut self, ident: &Ident, value: &Value) -> bool;
+    fn write(&mut self, address: &VersionedAddress, value: &Value) -> bool;
 }
 
 pub trait ExprEvalContext<Ident = Address> {
@@ -101,13 +101,13 @@ impl Upgrade {
     }
 }
 
-impl<Ident> Action<Ident> {
+impl Action {
     /// Evaluates this action.
     ///
     /// When `self` is [`Action::Nil`], no further evaulation will be done.
     pub fn eval<C>(&mut self, ctx: &mut C)
     where
-        C: ActionEvalContext<Ident>,
+        C: ActionEvalContext,
     {
         match self {
             Action::Seq(a, b) => {
@@ -131,8 +131,8 @@ impl<Ident> Action<Ident> {
         }
     }
 
-    /// Traverses the expression, calling the callback with each Ident the Action might write to.
-    pub fn visit_writes(&self, mut visitor: impl FnMut(&Ident, bool)) {
+    /// Traverses the expression, calling the callback with each VersionedAddress the Action might write to.
+    pub fn visit_writes(&self, mut visitor: impl FnMut(&VersionedAddress, bool)) {
         match self {
             Action::Seq(a, b) => {
                 a.visit_writes(&mut visitor);
@@ -145,8 +145,8 @@ impl<Ident> Action<Ident> {
         }
     }
 
-    /// Traverses the action, calling the callback with each Ident the Action might read from.
-    pub fn visit_reads(&self, mut visitor: impl FnMut(&Ident, bool)) {
+    /// Traverses the action, calling the callback with each VersionedAddress the Action might read from.
+    pub fn visit_reads(&self, mut visitor: impl FnMut(&VersionedAddress, bool)) {
         match self {
             Action::Seq(a, b) => {
                 a.visit_reads(&mut visitor);

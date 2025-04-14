@@ -1,14 +1,16 @@
 mod definition;
 mod held_locks;
 
-use std::collections::{btree_map, BTreeMap, HashSet};
+use std::collections::{btree_map, BTreeMap, HashMap, HashSet};
 
 use definition::Definition;
 use held_locks::{ExclusiveLockState, HeldLocks, SharedLockState};
 
 use crate::{
     actor::{Actor, Address, Context, Version},
-    message::{BasisStamp, LockKind, Message, NodeConfiguration, StampedValue, TxId},
+    message::{
+        BasisStamp, Iteration, LockKind, Message, NodeConfiguration, NodeKind, StampedValue, TxId,
+    },
 };
 
 pub struct Node {
@@ -36,6 +38,7 @@ pub struct Node {
     subscribers: HashSet<Address>,
 
     version: Version,
+    iteration: Iteration,
 }
 
 impl Node {
@@ -67,7 +70,7 @@ impl Node {
                     panic!("attempting to write a definition")
                 };
 
-                self.update_value(StampedValue { value, basis }, Some(&ctx));
+                self.update_value(StampedValue { value, basis }, &ctx, true);
 
                 Some(ctx)
             }
@@ -87,7 +90,7 @@ impl Node {
                     },
                 };
 
-                self.update_value(new_value, None);
+                self.update_value(new_value, &ctx, false);
 
                 self.version = self.version.increment();
 
@@ -163,13 +166,6 @@ impl Node {
             granted.push(txid.clone());
         }
 
-        let roots = self
-            .definition
-            .iter()
-            .flat_map(|d| d.roots())
-            .cloned()
-            .collect::<HashSet<_>>();
-
         for txid in granted {
             self.queued.remove(&txid);
             ctx.send(
@@ -177,20 +173,33 @@ impl Node {
                 Message::LockGranted {
                     txid: txid.clone(),
                     address: ctx.me().clone(),
-                    basis: self.value.basis.clone(),
-                    roots: roots.clone(),
+                    node_kind: if let Some(def) = &self.definition {
+                        NodeKind::Definition {
+                            ancestors: def
+                                .ancestors()
+                                .map(|(ad, an)| (ad.clone(), an.clone()))
+                                .collect(),
+                        }
+                    } else {
+                        NodeKind::Variable {
+                            iteration: self.iteration,
+                        }
+                    },
                     version: self.version,
+                    type_: self.value.value.compute_type(),
                 },
             );
         }
     }
 
-    fn update_value(&mut self, value: StampedValue, notify: Option<&Context>) {
+    fn update_value(&mut self, value: StampedValue, ctx: &Context, notify: bool) {
         self.value = value;
         self.value.basis.merge_from(&self.reads);
         self.reads = BasisStamp::empty();
 
-        if let Some(ctx) = notify {
+        self.iteration = self.iteration.max(self.value.basis.latest(ctx.me()));
+
+        if notify {
             for subscriber in &self.subscribers {
                 ctx.send(
                     subscriber,
@@ -311,7 +320,7 @@ impl Actor for Node {
                     Message::ReadResult {
                         txid: txid.clone(),
                         address: ctx.me().clone(),
-                        value: self.value.value.clone(),
+                        value: self.value.clone(),
                     },
                 );
             }
@@ -374,7 +383,7 @@ impl Actor for Node {
 
                 definition.add_update(sender, value);
                 if let Some(new_value) = definition.find_and_apply_batch() {
-                    self.update_value(new_value, Some(&ctx));
+                    self.update_value(new_value, &ctx, true);
                 }
             }
             _ => todo!(),

@@ -38,9 +38,9 @@ pub enum Expr<Ident = VersionedAddress> {
 }
 
 #[derive(Clone)]
-pub enum Action<Ident = VersionedAddress> {
-    Seq(Box<Action<Ident>>, Box<Action<Ident>>),
-    Write(Ident, Expr<Ident>),
+pub enum Action {
+    Seq(Box<Action>, Box<Action>),
+    Write(VersionedAddress, Expr<VersionedAddress>),
     Nil,
     // TODO: control flow
 }

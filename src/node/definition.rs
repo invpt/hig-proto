@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     actor::Address,
     expr::{eval::ExprEvalContext, Expr, Value},
-    message::{BasisStamp, InputConfiguration, StampedValue},
+    message::{Ancestor, BasisStamp, InputConfiguration, StampedValue},
 };
 
 pub struct Definition {
@@ -12,7 +12,7 @@ pub struct Definition {
 }
 
 struct Input {
-    roots: HashSet<Address>,
+    ancestors: HashMap<Address, Ancestor>,
     value: StampedValue,
     updates: Vec<StampedValue>,
 }
@@ -31,7 +31,7 @@ impl Definition {
                     (
                         address,
                         Input {
-                            roots: cfg.roots,
+                            ancestors: cfg.ancestors,
                             value: cfg.value,
                             updates: Vec::new(),
                         },
@@ -57,7 +57,7 @@ impl Definition {
                 (
                     address,
                     Input {
-                        roots: cfg.roots,
+                        ancestors: cfg.ancestors,
                         value: cfg.value,
                         updates: Vec::new(),
                     },
@@ -94,8 +94,8 @@ impl Definition {
         }
     }
 
-    pub fn roots(&self) -> impl Iterator<Item = &Address> {
-        self.inputs.values().flat_map(|i| i.roots.iter())
+    pub fn ancestors(&self) -> impl Iterator<Item = (&Address, &Ancestor)> {
+        self.inputs.values().flat_map(|i| i.ancestors.iter())
     }
 
     pub fn add_update(&mut self, sender: Address, value: StampedValue) {
@@ -118,7 +118,7 @@ impl Definition {
                     (
                         address,
                         BatchInput {
-                            roots: &input.roots,
+                            ancestors: &input.ancestors,
                             basis: &input.value.basis,
                             // Don't include any updates if this is an input we've already con-
                             // sidered as a seed. Since it was considered already, we know there
@@ -152,7 +152,7 @@ impl Definition {
             while {
                 let mut changed = false;
                 for (_, input) in inputs.iter_mut() {
-                    while !basis.prec_eq_wrt_roots(&input.basis, &input.roots) {
+                    while !basis.prec_eq_wrt_ancestors(&input.basis, &input.ancestors) {
                         let Some((update, rest)) = input.remaining_updates.split_first() else {
                             // We need an update from this input, but the input does not have an
                             // update to give us. That means there is no batch possible for the
@@ -215,7 +215,7 @@ impl Definition {
 }
 
 struct BatchInput<'a> {
-    roots: &'a HashSet<Address>,
+    ancestors: &'a HashMap<Address, Ancestor>,
     basis: &'a BasisStamp,
     remaining_updates: &'a [StampedValue],
     update_count: usize,
