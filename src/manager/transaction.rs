@@ -4,9 +4,9 @@ use crate::{
     actor::{Address, Context, Version, VersionedAddress},
     expr::{
         eval::{ActionEvalContext, ExprEvalContext, UpgradeEvalContext},
-        Action, Expr, Ident, Type, Upgrade, Value,
+        Action, Expr, Ident, Upgrade, Value,
     },
-    message::{Ancestor, BasisStamp, LockKind, Message, NodeKind, StampedValue, TxId},
+    message::{BasisStamp, LockKind, Message, NodeKind, StampedValue, TxId},
 };
 
 use super::directory::Directory;
@@ -34,7 +34,6 @@ struct Lock {
     wrote: bool,
     version: Version,
     node_kind: NodeKind,
-    type_: Type,
 }
 
 enum LockValue {
@@ -70,7 +69,7 @@ impl Transaction {
         }
     }
 
-    pub fn eval(&mut self, directory: &Directory, ctx: &Context) {
+    pub fn eval(&mut self, directory: &Directory, ctx: &Context) -> bool {
         match &mut self.kind {
             TransactionKind::Action(action) => {
                 self.state.may_write.clear();
@@ -91,7 +90,10 @@ impl Transaction {
                 });
 
                 if let Action::Nil = action {
-                    self.finish_action(ctx);
+                    self.release_locks(ctx);
+                    true
+                } else {
+                    false
                 }
             }
             TransactionKind::Upgrade(upgrade) => {
@@ -108,13 +110,15 @@ impl Transaction {
                 });
 
                 if let Upgrade::Nil = upgrade {
-                    self.process_upgrade(directory, ctx);
+                    self.process_upgrade(directory, ctx)
+                } else {
+                    false
                 }
             }
         }
     }
 
-    fn finish_action(&mut self, ctx: &Context) {
+    fn release_locks(&mut self, ctx: &Context) {
         let txid = self.state.id.clone();
         let basis = self
             .state
@@ -139,18 +143,14 @@ impl Transaction {
         }
     }
 
-    fn process_upgrade(&mut self, directory: &Directory, ctx: &Context) {
+    fn process_upgrade(&mut self, directory: &Directory, ctx: &Context) -> bool {
         _ = directory;
         _ = ctx;
+
+        false
     }
 
-    pub fn lock_granted(
-        &mut self,
-        address: Address,
-        version: Version,
-        node_kind: NodeKind,
-        type_: Type,
-    ) {
+    pub fn lock_granted(&mut self, address: Address, version: Version, node_kind: NodeKind) {
         let Some(expected_version) = self.state.pending_locks.remove(&address) else {
             panic!("we were granted a lock we did not request")
         };
@@ -168,7 +168,6 @@ impl Transaction {
                 wrote: false,
                 node_kind,
                 version,
-                type_,
             },
         );
     }

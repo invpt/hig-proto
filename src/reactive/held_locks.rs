@@ -1,12 +1,10 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use crate::{
-    actor::Address,
+    actor::{Address, Context},
     expr::Value,
-    message::{BasisStamp2, ReactiveConfiguration2, TxId},
+    message::{BasisStamp, Message, ReactiveConfiguration, TxId},
 };
-
-use super::ReactiveId;
 
 pub enum HeldLocks {
     None,
@@ -16,19 +14,21 @@ pub enum HeldLocks {
 
 #[derive(Default)]
 pub struct SharedLockState {
-    pub reads: HashMap<ReactiveId, Read>,
+    pub preempting: bool,
+    pub subscription_updates: HashMap<Address, bool>,
+    pub read: Option<Read>,
 }
 
-pub struct Read {
-    pub pending: BasisStamp2,
-    pub complete: BasisStamp2,
+pub enum Read {
+    Pending(BasisStamp),
+    Complete,
 }
 
-#[derive(Default)]
-pub struct ExclusiveLockState {
-    pub writes: HashMap<ReactiveId, Value>,
-    pub reactives: HashMap<ReactiveId, Option<ReactiveConfiguration2>>,
-    pub exports: HashMap<ReactiveId, HashSet<Address>>,
+pub enum ExclusiveLockState {
+    Unchanged,
+    Write(Value),
+    Update(ReactiveConfiguration),
+    Retire,
 }
 
 impl HeldLocks {
@@ -93,6 +93,15 @@ impl HeldLocks {
                 .for_each(|(txid, state)| visitor(txid, state)),
             HeldLocks::Exclusive(txid, state, _) => visitor(txid, state),
             HeldLocks::None => (),
+        }
+    }
+}
+
+impl SharedLockState {
+    pub fn preempt(&mut self, txid: &TxId, ctx: &Context) {
+        if !self.preempting {
+            self.preempting = true;
+            ctx.send(&txid.address, Message::Preempt { txid: txid.clone() });
         }
     }
 }

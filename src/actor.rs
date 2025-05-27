@@ -22,11 +22,22 @@ pub struct Context<'a> {
     me: Address,
 }
 
-pub trait Actor: Send {
-    fn init(&mut self, ctx: Context) {
-        _ = ctx;
-    }
+pub trait ActorConfiguration {
+    type Actor: Actor + 'static;
 
+    fn create(self, ctx: Context) -> Self::Actor;
+}
+
+// If an actor doesn't need access to a context when it is created, it can be spawned directly.
+impl<A: Actor + 'static> ActorConfiguration for A {
+    type Actor = A;
+
+    fn create(self, _ctx: Context) -> A {
+        self
+    }
+}
+
+pub trait Actor: Send {
     fn handle(&mut self, message: Message, ctx: Context);
 }
 
@@ -45,6 +56,8 @@ pub struct VersionedAddress {
 pub struct Version(usize);
 
 impl Version {
+    pub const ZERO: Version = Version(0);
+
     #[must_use]
     pub fn increment(self) -> Version {
         Version(self.0 + 1)
@@ -98,22 +111,17 @@ impl System {
         }
     }
 
-    pub fn spawn(&mut self, actor: impl Actor + 'static) -> Address {
-        self.spawn_with(|_| actor)
-    }
-
-    pub fn spawn_with<A: Actor + 'static>(&mut self, actor: impl FnOnce(Address) -> A) -> Address {
+    pub fn spawn<C: ActorConfiguration>(&mut self, configuration: C) -> Address {
         let address = Address {
             index: self.address_counter,
         };
         self.address_counter += 1;
 
-        let mut actor = Box::new(actor(address.clone()));
         self.actors.insert(address.clone(), None);
-        actor.init(Context {
+        let actor = Box::new(configuration.create(Context {
             system: RefCell::new(self),
             me: address.clone(),
-        });
+        }));
         if let Some(entry) = self.actors.get_mut(&address) {
             *entry = Some(actor);
         }
@@ -139,8 +147,8 @@ impl<'a> Context<'a> {
     }
 
     /// Spawns a new actor.
-    pub fn spawn(&self, actor: impl Actor + 'static) -> Address {
-        self.system.borrow_mut().spawn(actor)
+    pub fn spawn<C: ActorConfiguration>(&self, configuration: C) -> Address {
+        self.system.borrow_mut().spawn(configuration)
     }
 
     /// Retires this actor, meaning it will no longer be asked to handle messages.

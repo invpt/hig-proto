@@ -1,112 +1,53 @@
-mod definition;
-mod held_locks;
+use std::collections::{btree_map::Entry, hash_map, BTreeMap, HashMap, HashSet};
 
-use std::collections::{btree_map, BTreeMap, HashMap, HashSet};
-
-use definition::Definition;
-use held_locks::{ExclusiveLockState, HeldLocks, SharedLockState};
+use held_locks::{ExclusiveLockState, HeldLocks, Read, SharedLockState};
+use reactive::Reactive;
 
 use crate::{
-    actor::{Actor, Address, Context, Version},
-    message::{
-        BasisStamp, Iteration, LockKind, Message, NodeConfiguration, NodeKind, StampedValue, TxId,
-    },
+    actor::{Actor, Address, Context},
+    message::{BasisStamp2, LockKind, Message, StampedValue2, TxId},
 };
 
+mod held_locks;
+mod reactive;
+
 pub struct Node {
-    /// The set of locks waiting to be granted, ordered by transaction ID and hence from oldest to
-    /// youngest, thanks to the use of BTreeMap. The ordering makes it easy to pick the highest-
-    /// priority transaction for Wound-Wait.
     queued: BTreeMap<TxId, LockKind>,
-
-    /// The set of locks currently held.
     held: HeldLocks,
+    preempted: HashSet<TxId>,
 
-    /// When present, the definition of a node automatically updates the value based on values
-    /// propagated by other nodes.
-    definition: Option<Definition>,
+    reactives: HashMap<ReactiveId, Reactive>,
+    exports: HashMap<ReactiveId, HashSet<Address>>,
 
-    /// The current value held by the node. On nodes with a definition, the value is updated whenever
-    /// the definition applies a batch. On nodes without a definition, the value is updated by Write
-    /// messages during a transaction. The value is also updated whenever a node is reconfigured.
-    value: StampedValue,
+    imports: HashMap<ReactiveAddress, HashSet<ReactiveId>>,
+    subscriptions: HashMap<ReactiveId, HashSet<ReactiveId>>,
 
-    /// `reads` contains the transactions that have read the current value since it was set.
-    reads: BasisStamp,
-
-    /// The set of addresses to whom `Propagate` messages are sent whenever the value is changed.
-    subscribers: HashSet<Address>,
-
-    version: Version,
-    iteration: Iteration,
+    roots: HashMap<ReactiveAddress, HashSet<ReactiveAddress>>,
+    topo: Vec<ReactiveId>,
 }
 
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct ReactiveAddress {
+    pub address: Address,
+    pub id: ReactiveId,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ReactiveId(usize);
+
 impl Node {
-    fn apply_changes<'a>(
-        &mut self,
-        basis: BasisStamp,
-        shared_state: SharedLockState,
-        exclusive_state: ExclusiveLockState,
-        ctx: Context<'a>,
-    ) -> Option<Context<'a>> {
-        let SharedLockState {
-            preempting: _,
-            subscription_updates,
-            was_read,
-        } = shared_state;
-
-        if was_read {
-            self.reads.merge_from(&basis);
+    pub fn new() -> Node {
+        Node {
+            queued: BTreeMap::new(),
+            held: HeldLocks::None,
+            preempted: HashSet::new(),
+            imports: HashMap::new(),
+            reactives: HashMap::new(),
+            exports: HashMap::new(),
+            subscriptions: HashMap::new(),
+            roots: HashMap::new(),
+            topo: Vec::new(),
         }
-
-        let ctx = match exclusive_state {
-            ExclusiveLockState::Unchanged => Some(ctx),
-            ExclusiveLockState::Retire => {
-                ctx.retire();
-                None
-            }
-            ExclusiveLockState::Write(value) => {
-                let None = self.definition else {
-                    panic!("attempting to write a definition")
-                };
-
-                self.update_value(StampedValue { value, basis }, &ctx, true);
-
-                Some(ctx)
-            }
-            ExclusiveLockState::Update(update) => {
-                let new_value = match update {
-                    NodeConfiguration::Variable { value } => {
-                        self.definition = None;
-                        value
-                    }
-                    NodeConfiguration::Definition { expr, inputs } => match &mut self.definition {
-                        None => {
-                            let (definition, new_value) = Definition::new(expr, inputs);
-                            self.definition = Some(definition);
-                            new_value
-                        }
-                        Some(existing) => existing.reconfigure(expr, inputs),
-                    },
-                };
-
-                self.update_value(new_value, &ctx, false);
-
-                self.version = self.version.increment();
-
-                Some(ctx)
-            }
-        };
-
-        for (subscriber, subscribe) in subscription_updates {
-            if subscribe {
-                self.subscribers.insert(subscriber);
-            } else {
-                self.subscribers.remove(&subscriber);
-            }
-        }
-
-        ctx
     }
 
     fn grant_locks(&mut self, ctx: &Context) {
@@ -126,7 +67,7 @@ impl Node {
                         *held = HeldLocks::Exclusive(
                             txid.clone(),
                             SharedLockState::default(),
-                            ExclusiveLockState::Unchanged,
+                            ExclusiveLockState::default(),
                         );
                     }
                 },
@@ -139,12 +80,12 @@ impl Node {
                     LockKind::Exclusive => {
                         // request preemption of all held shared locks younger than the queued
                         // exclusive lock
-                        for (shared_txid, shared_state) in held.iter_mut().rev() {
+                        for (shared_txid, _) in held.iter_mut().rev() {
                             if shared_txid < txid {
                                 break;
                             }
 
-                            shared_state.preempt(shared_txid, ctx);
+                            Self::preempt(&mut self.preempted, shared_txid, ctx);
                         }
 
                         break;
@@ -152,10 +93,10 @@ impl Node {
                 },
 
                 // if an exclusive lock is held, we can grant no locks
-                HeldLocks::Exclusive(held_txid, shared_state, _) => {
+                HeldLocks::Exclusive(held_txid, _, _) => {
                     // request preemption of the exclusive lock if it is younger than the queued lock
                     if txid < held_txid {
-                        shared_state.preempt(txid, ctx);
+                        Self::preempt(&mut self.preempted, txid, ctx);
                     }
 
                     break;
@@ -170,55 +111,175 @@ impl Node {
             self.queued.remove(&txid);
             ctx.send(
                 &txid.address,
-                Message::LockGranted {
+                Message::LockGranted2 {
                     txid: txid.clone(),
                     address: ctx.me().clone(),
-                    node_kind: if let Some(def) = &self.definition {
-                        NodeKind::Definition {
-                            ancestors: def
-                                .ancestors()
-                                .map(|(ad, an)| (ad.clone(), an.clone()))
-                                .collect(),
-                        }
-                    } else {
-                        NodeKind::Variable {
-                            iteration: self.iteration,
-                        }
-                    },
-                    version: self.version,
-                    type_: self.value.value.compute_type(),
                 },
             );
         }
     }
 
-    fn update_value(&mut self, value: StampedValue, ctx: &Context, notify: bool) {
-        self.value = value;
-        self.value.basis.merge_from(&self.reads);
-        self.reads = BasisStamp::empty();
-
-        self.iteration = self.iteration.max(self.value.basis.latest(ctx.me()));
-
-        if notify {
-            for subscriber in &self.subscribers {
-                ctx.send(
-                    subscriber,
-                    Message::Propagate {
-                        sender: ctx.me().clone(),
-                        value: self.value.clone(),
-                    },
-                );
+    fn apply_changes<'a>(
+        &mut self,
+        basis: BasisStamp2,
+        shared_state: SharedLockState,
+        exclusive_state: ExclusiveLockState,
+        ctx: Context<'a>,
+    ) -> Option<Context<'a>> {
+        for (id, read) in shared_state.reads {
+            if !read.complete.is_empty() {
+                self.reactives.get_mut(&id).unwrap().finished_read(&basis);
             }
         }
+
+        let mut modified = exclusive_state
+            .writes
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
+
+        for (id, value) in exclusive_state.writes {
+            self.reactives.get_mut(&id).unwrap().write(StampedValue2 {
+                value,
+                basis: basis.clone(),
+            });
+        }
+
+        for (id, config) in exclusive_state.reactives {
+            if let Some(config) = config {
+                match self.reactives.entry(id) {
+                    hash_map::Entry::Vacant(e) => {
+                        e.insert(Reactive::new(config));
+                    }
+                    hash_map::Entry::Occupied(mut e) => {
+                        e.get_mut().reconfigure(config);
+                    }
+                }
+
+                // TOOD: this does not actually force a propagation of this node's value. but we
+                // want to do that. so, need to figure out a way to do that that actually works.
+                modified.insert(id);
+            } else {
+                self.reactives.remove(&id);
+            }
+        }
+
+        // TODO: update imports appropriately
+        // TODO: update subscriptions appropriately
+        // TODO: update roots appropriately
+        // TODO: update topo appropriately
+        //
+        // (lots of computation!)
+        // (this only needs to be done if there were code updates!)
+        // (maybe for this coarse locking strategy an `Upgrade` lock kind would be good!)
+        // (wouldn't really mean anything though, since Upgrade and Exclusive would still be mutex.)
+
+        for (id, addrs) in exclusive_state.exports {
+            if addrs.is_empty() {
+                self.exports.remove(&id);
+            } else {
+                self.exports.insert(id, addrs);
+            }
+        }
+
+        self.propagate(modified, &ctx);
+
+        Some(ctx)
+    }
+
+    fn preempt(preempted: &mut HashSet<TxId>, txid: &TxId, ctx: &Context) {
+        if preempted.insert(txid.clone()) {
+            ctx.send(&txid.address, Message::Preempt { txid: txid.clone() });
+        }
+    }
+
+    fn propagate(&mut self, modified: HashSet<ReactiveId>, ctx: &Context) {
+        let mut found = false;
+        for id in &self.topo {
+            if !found {
+                if modified.contains(id) {
+                    found = true;
+                } else {
+                    continue;
+                }
+            }
+
+            while let Some(value) = self
+                .reactives
+                .get_mut(id)
+                .unwrap()
+                .process_update(&self.roots)
+            {
+                for sub in self.subscriptions.get(id).unwrap() {
+                    self.reactives.get_mut(sub).unwrap().add_update(
+                        ReactiveAddress {
+                            address: ctx.me().clone(),
+                            id: *id,
+                        },
+                        value.clone(),
+                    );
+                }
+
+                for addr in self.exports.get(id).iter().copied().flatten() {
+                    ctx.send(
+                        addr,
+                        Message::Propagate2 {
+                            sender: ReactiveAddress {
+                                address: ctx.me().clone(),
+                                id: *id,
+                            },
+                            value: value.clone(),
+                        },
+                    );
+                }
+            }
+        }
+
+        self.grant_reads(&ctx);
+    }
+
+    fn grant_reads(&mut self, ctx: &Context) {
+        self.held.visit_shared(|txid, state| {
+            for (id, read) in &mut state.reads {
+                // If a read is completed, the `complete` stamp has to have SOMETHING in it -- no
+                // value can have an empty basis stamp. Hence if `complete` is empty, the read is
+                // pending and needs to be sent out.
+                //
+                // Alternatively, we may have already completed a read, but another is pending.
+                if read.complete.is_empty() || !read.pending.is_empty() {
+                    if let Some(value) = self.reactives.get(&id).unwrap().value() {
+                        let address = ReactiveAddress {
+                            address: ctx.me().clone(),
+                            id: *id,
+                        };
+
+                        let roots = self.roots.get(&address).unwrap();
+
+                        if read.pending.prec_eq_wrt_roots(&value.basis, roots) {
+                            ctx.send(
+                                &txid.address,
+                                Message::ReadResult2 {
+                                    txid: txid.clone(),
+                                    reactive: address,
+                                    value: value.clone(),
+                                },
+                            );
+
+                            read.complete.merge_from(&value.basis);
+                        }
+                    }
+                }
+            }
+        });
     }
 }
 
 impl Actor for Node {
     fn handle(&mut self, message: Message, mut ctx: Context) {
         match message {
-            Message::Lock { txid, kind } => {
-                let btree_map::Entry::Vacant(e) = self.queued.entry(txid.clone()) else {
-                    panic!("lock was double-requested")
+            Message::Lock2 { txid, kind } => {
+                let Entry::Vacant(e) = self.queued.entry(txid) else {
+                    panic!("lock was double-requested");
                 };
 
                 e.insert(kind);
@@ -226,26 +287,21 @@ impl Actor for Node {
                 self.grant_locks(&ctx);
             }
             Message::Abort { txid } => {
-                match std::mem::replace(&mut self.held, HeldLocks::None) {
+                match &mut self.held {
                     HeldLocks::None => panic!("abort of unheld lock requested"),
-                    HeldLocks::Shared(mut held) => {
-                        let data = held.remove(&txid);
-
-                        if held.len() != 0 {
-                            // restore the remaining held shared locks
-                            self.held = HeldLocks::Shared(held);
-                        }
-
-                        if data.is_none() {
+                    HeldLocks::Shared(held) => {
+                        if held.remove(&txid).is_none() {
                             panic!("abort of unheld lock requested")
                         }
-                    }
-                    HeldLocks::Exclusive(held_txid, shared_data, exclusive_data) => {
-                        if held_txid != txid {
-                            // restore the unmatched exclusive lock
-                            self.held =
-                                HeldLocks::Exclusive(held_txid, shared_data, exclusive_data);
 
+                        if held.is_empty() {
+                            self.held = HeldLocks::None;
+                        }
+                    }
+                    HeldLocks::Exclusive(held_txid, _, _) => {
+                        if held_txid == &txid {
+                            self.held = HeldLocks::None;
+                        } else {
                             panic!("abort of unheld lock requested")
                         }
                     }
@@ -253,20 +309,46 @@ impl Actor for Node {
 
                 self.grant_locks(&ctx);
             }
-            Message::Release { txid, basis: roots } => {
+            Message::PrepareCommit { txid } => {
+                let state = self
+                    .held
+                    .shared(&txid)
+                    .expect("attempted to prepare commit for unheld lock");
+
+                let basis = state
+                    .reads
+                    .values()
+                    .fold(BasisStamp2::empty(), |mut basis, read| {
+                        basis.merge_from(&read.complete);
+                        basis
+                    });
+
+                // TODO: **comprehensively** validate the update (ideally equivalent to fully
+                // executing it), perhaps by doing it and adding an 'undo log' entry, so that no
+                // can occur after CommitPrepared is sent
+
+                ctx.send(
+                    &txid.address,
+                    Message::CommitPrepared {
+                        txid: txid.clone(),
+                        basis,
+                    },
+                );
+            }
+            Message::Commit { txid, basis } => {
                 match std::mem::replace(&mut self.held, HeldLocks::None) {
                     HeldLocks::None => panic!("release of unheld lock requested"),
                     HeldLocks::Shared(mut held) => {
                         let data = held.remove(&txid);
 
-                        if held.len() != 0 {
+                        if !held.is_empty() {
                             // restore the remaining held shared locks
                             self.held = HeldLocks::Shared(held);
                         }
 
                         if let Some(data) = data {
                             if let Some(returned) =
-                                self.apply_changes(roots, data, ExclusiveLockState::Unchanged, ctx)
+                                self.apply_changes(basis, data, ExclusiveLockState::default(), ctx)
                             {
                                 ctx = returned;
                             } else {
@@ -279,7 +361,7 @@ impl Actor for Node {
                     HeldLocks::Exclusive(held_txid, shared_data, exclusive_data) => {
                         if held_txid == txid {
                             if let Some(returned) =
-                                self.apply_changes(roots, shared_data, exclusive_data, ctx)
+                                self.apply_changes(basis, shared_data, exclusive_data, ctx)
                             {
                                 ctx = returned;
                             } else {
@@ -297,94 +379,100 @@ impl Actor for Node {
 
                 self.grant_locks(&ctx);
             }
-            Message::UpdateSubscriptions { txid, changes } => {
-                let Some(shared_state) = self.held.shared_mut(&txid) else {
-                    panic!("requested subscription update without shared lock")
-                };
-
-                shared_state.subscription_updates.extend(changes);
-            }
-            Message::Read { txid, basis: roots } => {
-                let Some(shared_state) = self.held.shared_mut(&txid) else {
-                    panic!("requested read without shared lock")
-                };
-
-                if !roots.root_iterations.is_empty() {
-                    todo!("read node with predecessors")
-                }
-
-                shared_state.was_read = true;
-
-                ctx.send(
-                    &txid.address,
-                    Message::ReadResult {
-                        txid: txid.clone(),
-                        address: ctx.me().clone(),
-                        value: self.value.clone(),
-                    },
-                );
-            }
-            Message::Reconfigure {
+            Message::Read2 {
                 txid,
-                configuration,
+                reactive,
+                basis,
             } => {
-                let Some(exclusive) = self.held.exclusive_mut(&txid) else {
-                    panic!("requested update configuration without exclusive lock")
+                let Some(lock) = self.held.shared_mut(&txid) else {
+                    panic!("attempted to read without a lock")
                 };
 
-                match exclusive {
-                    ExclusiveLockState::Unchanged
-                    | ExclusiveLockState::Write(..)
-                    | ExclusiveLockState::Update(..) => {
-                        *exclusive = ExclusiveLockState::Update(configuration);
-                    }
-                    ExclusiveLockState::Retire => {
-                        panic!("attempted to update configuration after retire")
+                let Some(r) = self.reactives.get(&reactive) else {
+                    panic!("attempted to read reactive that could not be found")
+                };
+
+                let e = lock.reads.entry(reactive);
+
+                if let hash_map::Entry::Occupied(e) = &e {
+                    let r = e.get();
+                    if r.complete.is_empty() || !r.pending.is_empty() {
+                        panic!("attempted to read while another read is still pending")
                     }
                 }
-            }
-            Message::Write { txid, value } => {
-                let Some(exclusive) = self.held.exclusive_mut(&txid) else {
-                    panic!("requested write without exclusive lock")
-                };
 
-                let None = self.definition else {
-                    panic!("requested to write value on definition")
-                };
+                let read = e.or_insert(Read {
+                    pending: BasisStamp2::empty(),
+                    complete: BasisStamp2::empty(),
+                });
 
-                match exclusive {
-                    ExclusiveLockState::Unchanged | ExclusiveLockState::Write(..) => {
-                        *exclusive = ExclusiveLockState::Write(value);
+                if let Some(value) = r.value() {
+                    if basis.prec_eq_wrt_roots(
+                        &value.basis,
+                        self.roots
+                            .get(&ReactiveAddress {
+                                address: ctx.me().clone(),
+                                id: reactive,
+                            })
+                            .unwrap(),
+                    ) {
+                        ctx.send(
+                            &txid.address,
+                            Message::ReadResult2 {
+                                txid: txid.clone(),
+                                reactive: ReactiveAddress {
+                                    address: ctx.me().clone(),
+                                    id: reactive,
+                                },
+                                value: value.clone(),
+                            },
+                        );
+
+                        read.complete.merge_from(&value.basis);
+                    } else {
+                        read.pending = basis;
                     }
-                    ExclusiveLockState::Update(NodeConfiguration::Variable {
-                        value: current_value,
-                    }) => {
-                        current_value.value = value;
-                        todo!("what to do here about current_value.predecessors?")
-                    }
-                    ExclusiveLockState::Update(NodeConfiguration::Definition { .. })
-                    | ExclusiveLockState::Retire => {
-                        panic!("attempted to write value on definition or after retire")
-                    }
+                } else {
+                    read.pending = basis;
                 }
             }
-            Message::Retire { txid } => {
-                let Some(exclusive) = self.held.exclusive_mut(&txid) else {
-                    panic!("requested retirement without exclusive lock")
+            Message::Write2 {
+                txid,
+                reactive,
+                value,
+            } => {
+                let state = self
+                    .held
+                    .exclusive_mut(&txid)
+                    .expect("attempted to write without an exclusive lock");
+                assert!(self.reactives.contains_key(&reactive));
+                state.writes.insert(reactive, value);
+            }
+            Message::Configure {
+                txid,
+                reactives,
+                exports,
+            } => {
+                let state = self
+                    .held
+                    .exclusive_mut(&txid)
+                    .expect("attempted to configure without an exclusive lock");
+                state.reactives.extend(reactives);
+                state.exports.extend(exports);
+            }
+            Message::Propagate2 { sender, value } => {
+                let Some(importers) = self.imports.get(&sender) else {
+                    return;
                 };
 
-                *exclusive = ExclusiveLockState::Retire;
-            }
-            Message::Propagate { sender, value } => {
-                let definition = self
-                    .definition
-                    .as_mut()
-                    .expect("variable node received propagation");
-
-                definition.add_update(sender, value);
-                if let Some(new_value) = definition.find_and_apply_batch() {
-                    self.update_value(new_value, &ctx, true);
+                for id in importers {
+                    self.reactives
+                        .get_mut(id)
+                        .unwrap()
+                        .add_update(sender.clone(), value.clone());
                 }
+
+                self.propagate(importers.clone(), &ctx);
             }
             _ => todo!(),
         }
