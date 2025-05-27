@@ -2,30 +2,30 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     expr::{eval::ExprEvalContext, Expr, Value},
-    message::{BasisStamp2, ReactiveConfiguration2, StampedValue2},
+    message::{BasisStamp, ReactiveConfiguration, StampedValue},
 };
 
 use super::ReactiveAddress;
 
 pub struct Reactive {
     definition: Option<Definition>,
-    value: Option<StampedValue2>,
-    read_by: BasisStamp2,
+    value: Option<StampedValue>,
+    read_by: BasisStamp,
 }
 
 impl Reactive {
-    pub fn new(config: ReactiveConfiguration2) -> Reactive {
+    pub fn new(config: ReactiveConfiguration) -> Reactive {
         let mut reactive = Reactive {
             definition: None,
             value: None,
-            read_by: BasisStamp2::empty(),
+            read_by: BasisStamp::empty(),
         };
 
         match config {
-            ReactiveConfiguration2::Variable { value } => {
+            ReactiveConfiguration::Variable { value } => {
                 reactive.value = Some(value);
             }
-            ReactiveConfiguration2::Definition { expr } => {
+            ReactiveConfiguration::Definition { expr } => {
                 reactive.definition = Some(Definition::new(expr));
             }
         }
@@ -33,13 +33,13 @@ impl Reactive {
         reactive
     }
 
-    pub fn reconfigure(&mut self, config: ReactiveConfiguration2) -> Option<StampedValue2> {
+    pub fn reconfigure(&mut self, config: ReactiveConfiguration) -> Option<StampedValue> {
         match config {
-            ReactiveConfiguration2::Variable { value } => {
+            ReactiveConfiguration::Variable { value } => {
                 self.definition = None;
                 self.value = Some(value);
             }
-            ReactiveConfiguration2::Definition { expr } => {
+            ReactiveConfiguration::Definition { expr } => {
                 let definition = if let Some(definition) = &mut self.definition {
                     definition.reconfigure(expr);
                     definition
@@ -58,7 +58,7 @@ impl Reactive {
         self.definition.iter().flat_map(|d| d.inputs.keys())
     }
 
-    pub fn add_update(&mut self, sender: ReactiveAddress, value: StampedValue2) {
+    pub fn add_update(&mut self, sender: ReactiveAddress, value: StampedValue) {
         if let Some(definition) = &mut self.definition {
             definition.add_update(sender, value)
         } else {
@@ -69,7 +69,7 @@ impl Reactive {
     pub fn process_update(
         &mut self,
         roots: &HashMap<ReactiveAddress, HashSet<ReactiveAddress>>,
-    ) -> Option<StampedValue2> {
+    ) -> Option<StampedValue> {
         if let Some(definition) = &mut self.definition {
             definition.find_and_apply_batch(roots)
         } else {
@@ -77,15 +77,15 @@ impl Reactive {
         }
     }
 
-    pub fn value(&self) -> Option<&StampedValue2> {
+    pub fn value(&self) -> Option<&StampedValue> {
         self.value.as_ref()
     }
 
-    pub fn finished_read(&mut self, basis: &BasisStamp2) {
+    pub fn finished_read(&mut self, basis: &BasisStamp) {
         self.read_by.merge_from(basis);
     }
 
-    pub fn write(&mut self, mut value: StampedValue2) {
+    pub fn write(&mut self, mut value: StampedValue) {
         assert!(self.definition.is_none());
         value.basis.merge_from(&self.read_by);
         self.value = Some(value);
@@ -99,16 +99,16 @@ struct Definition {
 }
 
 struct Input {
-    value: Option<StampedValue2>,
-    updates: Vec<StampedValue2>,
+    value: Option<StampedValue>,
+    updates: Vec<StampedValue>,
 }
 
 struct EvalContext<'a>(&'a HashMap<ReactiveAddress, Input>);
 
 struct BatchInput<'a> {
     roots: HashSet<ReactiveAddress>,
-    basis: BasisStamp2,
-    remaining_updates: &'a [StampedValue2],
+    basis: BasisStamp,
+    remaining_updates: &'a [StampedValue],
     update_count: usize,
 }
 
@@ -136,27 +136,27 @@ impl Definition {
         self.expr = expr;
     }
 
-    pub fn compute(&self) -> Option<StampedValue2> {
+    pub fn compute(&self) -> Option<StampedValue> {
         let mut expr = self.expr.clone();
         expr.eval(&mut EvalContext(&self.inputs));
         let Expr::Value(value) = expr else {
             return None;
         };
 
-        Some(StampedValue2 {
+        Some(StampedValue {
             value,
             basis: self
                 .inputs
                 .values()
                 .map(|input| &input.value.as_ref().unwrap().basis)
-                .fold(BasisStamp2::empty(), |mut a, b| {
+                .fold(BasisStamp::empty(), |mut a, b| {
                     a.merge_from(&b);
                     a
                 }),
         })
     }
 
-    fn add_update(&mut self, sender: ReactiveAddress, value: StampedValue2) {
+    fn add_update(&mut self, sender: ReactiveAddress, value: StampedValue) {
         self.inputs
             .get_mut(&sender)
             .expect("received update from unknown input")
@@ -167,7 +167,7 @@ impl Definition {
     fn find_and_apply_batch(
         &mut self,
         roots: &HashMap<ReactiveAddress, HashSet<ReactiveAddress>>,
-    ) -> Option<StampedValue2> {
+    ) -> Option<StampedValue> {
         let mut found = None;
 
         let mut explored = HashSet::new();
@@ -184,7 +184,7 @@ impl Definition {
                                 .value
                                 .as_ref()
                                 .map(|v| v.basis.clone())
-                                .unwrap_or(BasisStamp2::empty()),
+                                .unwrap_or(BasisStamp::empty()),
                             // Don't include any updates if this is an input we've already con-
                             // sidered as a seed. Since it was considered already, we know there
                             // are definitely no valid batches available now that involve this
@@ -282,7 +282,7 @@ impl Definition {
             panic!("expr did not fully evaluate")
         };
 
-        Some(StampedValue2 { value, basis })
+        Some(StampedValue { value, basis })
     }
 }
 

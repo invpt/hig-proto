@@ -5,7 +5,7 @@ use reactive::Reactive;
 
 use crate::{
     actor::{Actor, Address, Context},
-    message::{BasisStamp2, LockKind, Message, StampedValue2, TxId},
+    message::{BasisStamp, LockKind, Message, StampedValue, TxId},
 };
 
 mod held_locks;
@@ -111,7 +111,7 @@ impl Node {
             self.queued.remove(&txid);
             ctx.send(
                 &txid.address,
-                Message::LockGranted2 {
+                Message::LockGranted {
                     txid: txid.clone(),
                     address: ctx.me().clone(),
                 },
@@ -121,7 +121,7 @@ impl Node {
 
     fn apply_changes<'a>(
         &mut self,
-        basis: BasisStamp2,
+        basis: BasisStamp,
         shared_state: SharedLockState,
         exclusive_state: ExclusiveLockState,
         ctx: Context<'a>,
@@ -139,7 +139,7 @@ impl Node {
             .collect::<HashSet<_>>();
 
         for (id, value) in exclusive_state.writes {
-            self.reactives.get_mut(&id).unwrap().write(StampedValue2 {
+            self.reactives.get_mut(&id).unwrap().write(StampedValue {
                 value,
                 basis: basis.clone(),
             });
@@ -223,7 +223,7 @@ impl Node {
                 for addr in self.exports.get(id).iter().copied().flatten() {
                     ctx.send(
                         addr,
-                        Message::Propagate2 {
+                        Message::Propagate {
                             sender: ReactiveAddress {
                                 address: ctx.me().clone(),
                                 id: *id,
@@ -258,7 +258,7 @@ impl Node {
                         if read.pending.prec_eq_wrt_roots(&value.basis, roots) {
                             ctx.send(
                                 &txid.address,
-                                Message::ReadResult2 {
+                                Message::ReadResult {
                                     txid: txid.clone(),
                                     reactive: address,
                                     value: value.clone(),
@@ -277,7 +277,7 @@ impl Node {
 impl Actor for Node {
     fn handle(&mut self, message: Message, mut ctx: Context) {
         match message {
-            Message::Lock2 { txid, kind } => {
+            Message::Lock { txid, kind } => {
                 let Entry::Vacant(e) = self.queued.entry(txid) else {
                     panic!("lock was double-requested");
                 };
@@ -318,7 +318,7 @@ impl Actor for Node {
                 let basis = state
                     .reads
                     .values()
-                    .fold(BasisStamp2::empty(), |mut basis, read| {
+                    .fold(BasisStamp::empty(), |mut basis, read| {
                         basis.merge_from(&read.complete);
                         basis
                     });
@@ -379,7 +379,7 @@ impl Actor for Node {
 
                 self.grant_locks(&ctx);
             }
-            Message::Read2 {
+            Message::Read {
                 txid,
                 reactive,
                 basis,
@@ -402,8 +402,8 @@ impl Actor for Node {
                 }
 
                 let read = e.or_insert(Read {
-                    pending: BasisStamp2::empty(),
-                    complete: BasisStamp2::empty(),
+                    pending: BasisStamp::empty(),
+                    complete: BasisStamp::empty(),
                 });
 
                 if let Some(value) = r.value() {
@@ -418,7 +418,7 @@ impl Actor for Node {
                     ) {
                         ctx.send(
                             &txid.address,
-                            Message::ReadResult2 {
+                            Message::ReadResult {
                                 txid: txid.clone(),
                                 reactive: ReactiveAddress {
                                     address: ctx.me().clone(),
@@ -436,7 +436,7 @@ impl Actor for Node {
                     read.pending = basis;
                 }
             }
-            Message::Write2 {
+            Message::Write {
                 txid,
                 reactive,
                 value,
@@ -460,7 +460,7 @@ impl Actor for Node {
                 state.reactives.extend(reactives);
                 state.exports.extend(exports);
             }
-            Message::Propagate2 { sender, value } => {
+            Message::Propagate { sender, value } => {
                 let Some(importers) = self.imports.get(&sender) else {
                     return;
                 };

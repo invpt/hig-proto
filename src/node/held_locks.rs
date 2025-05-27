@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::{
     actor::Address,
     expr::Value,
-    message::{BasisStamp2, ReactiveConfiguration2, TxId},
+    message::{BasisStamp, ReactiveConfiguration, TxId},
 };
 
 use super::ReactiveId;
@@ -20,14 +20,14 @@ pub struct SharedLockState {
 }
 
 pub struct Read {
-    pub pending: BasisStamp2,
-    pub complete: BasisStamp2,
+    pub pending: BasisStamp,
+    pub complete: BasisStamp,
 }
 
 #[derive(Default)]
 pub struct ExclusiveLockState {
     pub writes: HashMap<ReactiveId, Value>,
-    pub reactives: HashMap<ReactiveId, Option<ReactiveConfiguration2>>,
+    pub reactives: HashMap<ReactiveId, Option<ReactiveConfiguration>>,
     pub exports: HashMap<ReactiveId, HashSet<Address>>,
 }
 

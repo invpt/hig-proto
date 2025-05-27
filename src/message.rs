@@ -19,12 +19,8 @@ pub enum Message {
 
     // propagation
     Propagate {
-        sender: Address,
-        value: StampedValue,
-    },
-    Propagate2 {
         sender: ReactiveAddress,
-        value: StampedValue2,
+        value: StampedValue,
     },
 
     // transaction - initial lock request
@@ -35,70 +31,32 @@ pub enum Message {
     LockGranted {
         txid: TxId,
         address: Address,
-        version: Version,
-        node_kind: NodeKind,
-    },
-    Lock2 {
-        txid: TxId,
-        kind: LockKind,
-    },
-    LockGranted2 {
-        txid: TxId,
-        address: Address,
     },
 
     // transaction - messages available to shared and exclusive locks
     Read {
         txid: TxId,
+        reactive: ReactiveId,
         basis: BasisStamp,
     },
     ReadResult {
         txid: TxId,
-        address: Address,
-        value: StampedValue,
-    },
-    Read2 {
-        txid: TxId,
-        reactive: ReactiveId,
-        basis: BasisStamp2,
-    },
-    ReadResult2 {
-        txid: TxId,
         reactive: ReactiveAddress,
-        value: StampedValue2,
-    },
-    ReadSubscriptions {
-        txid: TxId,
-    },
-    ReadSubscriptionsResult {
-        txid: TxId,
-        subscriptions: HashSet<Address>,
+        value: StampedValue,
     },
 
     // transaction - messages available to exclusive locks
     Write {
         txid: TxId,
-        value: Value,
-    },
-    Write2 {
-        txid: TxId,
         reactive: ReactiveId,
         value: Value,
-    },
-    UpdateSubscriptions {
-        txid: TxId,
-        changes: HashMap<Address, bool>,
-    },
-    Reconfigure {
-        txid: TxId,
-        configuration: ReactiveConfiguration,
     },
     Retire {
         txid: TxId,
     },
     Configure {
         txid: TxId,
-        reactives: HashMap<ReactiveId, Option<ReactiveConfiguration2>>,
+        reactives: HashMap<ReactiveId, Option<ReactiveConfiguration>>,
         exports: HashMap<ReactiveId, HashSet<Address>>,
     },
 
@@ -109,22 +67,16 @@ pub enum Message {
     Abort {
         txid: TxId,
     },
-    // non-2PC specific to version 1
-    Release {
-        txid: TxId,
-        basis: BasisStamp,
-    },
-    // 2PC specific to version 2
     PrepareCommit {
         txid: TxId,
     },
     CommitPrepared {
         txid: TxId,
-        basis: BasisStamp2,
+        basis: BasisStamp,
     },
     Commit {
         txid: TxId,
-        basis: BasisStamp2,
+        basis: BasisStamp,
     },
 
     // messages sent/received by managers
@@ -140,91 +92,6 @@ pub enum Message {
 }
 
 #[derive(Clone)]
-pub enum NodeKind {
-    Variable {
-        iteration: Iteration,
-    },
-    Definition {
-        ancestors: HashMap<Address, Ancestor>,
-    },
-}
-
-#[derive(Clone)]
-pub struct StampedValue2 {
-    pub value: Value,
-    pub basis: BasisStamp2,
-}
-
-#[derive(Clone)]
-pub struct BasisStamp2 {
-    pub root_iterations: HashMap<ReactiveAddress, Iteration>,
-}
-
-impl BasisStamp2 {
-    pub fn empty() -> BasisStamp2 {
-        BasisStamp2 {
-            root_iterations: HashMap::new(),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.root_iterations.is_empty()
-    }
-
-    pub fn latest(&self, address: &ReactiveAddress) -> Iteration {
-        self.root_iterations
-            .get(address)
-            .copied()
-            .unwrap_or(Iteration(0))
-    }
-
-    pub fn add(&mut self, address: ReactiveAddress, iteration: Iteration) {
-        match self.root_iterations.entry(address) {
-            Entry::Vacant(entry) => {
-                entry.insert(iteration);
-            }
-            Entry::Occupied(mut entry) => {
-                *entry.get_mut() = (*entry.get()).max(iteration);
-            }
-        }
-    }
-
-    pub fn merge_from(&mut self, other: &BasisStamp2) {
-        for (address, iteration) in &other.root_iterations {
-            self.add(address.clone(), *iteration);
-        }
-    }
-
-    pub fn clear(&mut self) {
-        self.root_iterations.clear();
-    }
-
-    pub fn prec_eq_wrt_ancestors(
-        &self,
-        other: &BasisStamp2,
-        ancestors: &HashMap<ReactiveAddress, Ancestor>,
-    ) -> bool {
-        for ancestor in ancestors.keys() {
-            if self.latest(ancestor) > other.latest(ancestor) {
-                return false;
-            }
-        }
-
-        true
-    }
-
-    pub fn prec_eq_wrt_roots(&self, other: &BasisStamp2, roots: &HashSet<ReactiveAddress>) -> bool {
-        for root in roots {
-            if self.latest(root) > other.latest(root) {
-                return false;
-            }
-        }
-
-        true
-    }
-}
-
-#[derive(Clone)]
 pub struct StampedValue {
     pub value: Value,
     pub basis: BasisStamp,
@@ -232,29 +99,26 @@ pub struct StampedValue {
 
 #[derive(Clone)]
 pub struct BasisStamp {
-    pub root_iterations: HashMap<Address, Iteration>,
+    pub roots: HashMap<ReactiveAddress, Iteration>,
 }
 
 impl BasisStamp {
     pub fn empty() -> BasisStamp {
         BasisStamp {
-            root_iterations: HashMap::new(),
+            roots: HashMap::new(),
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.root_iterations.is_empty()
+        self.roots.is_empty()
     }
 
-    pub fn latest(&self, address: &Address) -> Iteration {
-        self.root_iterations
-            .get(address)
-            .copied()
-            .unwrap_or(Iteration(0))
+    pub fn latest(&self, address: &ReactiveAddress) -> Iteration {
+        self.roots.get(address).copied().unwrap_or(Iteration(0))
     }
 
-    pub fn add(&mut self, address: Address, iteration: Iteration) {
-        match self.root_iterations.entry(address) {
+    pub fn add(&mut self, address: ReactiveAddress, iteration: Iteration) {
+        match self.roots.entry(address) {
             Entry::Vacant(entry) => {
                 entry.insert(iteration);
             }
@@ -265,18 +129,18 @@ impl BasisStamp {
     }
 
     pub fn merge_from(&mut self, other: &BasisStamp) {
-        for (address, iteration) in &other.root_iterations {
+        for (address, iteration) in &other.roots {
             self.add(address.clone(), *iteration);
         }
     }
 
-    pub fn prec_eq_wrt_ancestors(
-        &self,
-        other: &BasisStamp,
-        ancestors: &HashMap<Address, Ancestor>,
-    ) -> bool {
-        for ancestor in ancestors.keys() {
-            if self.latest(ancestor) > other.latest(ancestor) {
+    pub fn clear(&mut self) {
+        self.roots.clear();
+    }
+
+    pub fn prec_eq_wrt_roots(&self, other: &BasisStamp, roots: &HashSet<ReactiveAddress>) -> bool {
+        for root in roots {
+            if self.latest(root) > other.latest(root) {
                 return false;
             }
         }
@@ -298,30 +162,9 @@ impl Iteration {
 }
 
 #[derive(Clone)]
-pub enum ReactiveConfiguration2 {
-    Variable { value: StampedValue2 },
-    Definition { expr: Expr<ReactiveAddress> },
-}
-
-#[derive(Clone)]
 pub enum ReactiveConfiguration {
-    Variable {
-        value: StampedValue,
-    },
-    Definition {
-        expr: Expr<Address>,
-        inputs: HashMap<Address, InputMetadata>,
-    },
-}
-
-#[derive(Clone)]
-pub struct InputMetadata {
-    pub ancestors: HashMap<Address, Ancestor>,
-}
-
-#[derive(Clone)]
-pub struct Ancestor {
-    pub is_root: bool,
+    Variable { value: StampedValue },
+    Definition { expr: Expr<ReactiveAddress> },
 }
 
 #[derive(Clone)]

@@ -1,9 +1,8 @@
 mod actor;
 mod expr;
-mod manager;
+//mod manager; // will have to port/update this later
 mod message;
 mod node;
-mod reactive;
 
 fn main() {
     println!("Hello, world!");
