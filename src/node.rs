@@ -1,11 +1,11 @@
-use std::collections::{btree_map::Entry, hash_map, BTreeMap, HashMap, HashSet};
+use std::collections::{btree_map::Entry, hash_map, BTreeMap, HashMap, HashSet, VecDeque};
 
 use held_locks::{ExclusiveLockState, HeldLocks, Read, SharedLockState};
 use reactive::Reactive;
 
 use crate::{
     actor::{Actor, Address, Context},
-    message::{BasisStamp, LockKind, Message, StampedValue, TxId},
+    message::{BasisStamp, Iteration, LockKind, Message, StampedValue, TxId},
 };
 
 mod held_locks;
@@ -16,24 +16,40 @@ pub struct Node {
     held: HeldLocks,
     preempted: HashSet<TxId>,
 
+    imports: HashMap<ReactiveAddress, Import>,
     reactives: HashMap<ReactiveId, Reactive>,
-    exports: HashMap<ReactiveId, HashSet<Address>>,
+    iterations: HashMap<ReactiveId, Iteration>,
+    exports: HashMap<ReactiveId, Export>,
 
-    imports: HashMap<ReactiveAddress, HashSet<ReactiveId>>,
     subscriptions: HashMap<ReactiveId, HashSet<ReactiveId>>,
-
-    roots: HashMap<ReactiveAddress, HashSet<ReactiveAddress>>,
-    topo: Vec<ReactiveId>,
+    roots: HashMap<ReactiveId, HashSet<ReactiveAddress>>,
+    topo: VecDeque<ReactiveId>,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ReactiveAddress {
     pub address: Address,
     pub id: ReactiveId,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ReactiveId(usize);
+
+#[derive(Clone)]
+pub struct Import {
+    pub roots: HashSet<ReactiveAddress>,
+    pub importers: HashSet<ReactiveId>,
+}
+
+pub struct Export {
+    /// Exports' roots only contain cross-network roots, since they are themselves sources standing
+    /// in for each of the local reactive state variables (if any).
+    pub roots: HashSet<ReactiveAddress>,
+    pub importers: HashSet<Address>,
+}
+
+#[derive(Debug)]
+struct Cyclical;
 
 impl Node {
     pub fn new() -> Node {
@@ -43,10 +59,11 @@ impl Node {
             preempted: HashSet::new(),
             imports: HashMap::new(),
             reactives: HashMap::new(),
+            iterations: HashMap::new(),
             exports: HashMap::new(),
             subscriptions: HashMap::new(),
             roots: HashMap::new(),
-            topo: Vec::new(),
+            topo: VecDeque::new(),
         }
     }
 
@@ -119,9 +136,9 @@ impl Node {
         }
     }
 
-    fn apply_changes<'a>(
+    fn commit<'a>(
         &mut self,
-        basis: BasisStamp,
+        mut basis: BasisStamp,
         shared_state: SharedLockState,
         exclusive_state: ExclusiveLockState,
         ctx: Context<'a>,
@@ -139,52 +156,206 @@ impl Node {
             .collect::<HashSet<_>>();
 
         for (id, value) in exclusive_state.writes {
+            // The direct writes won't necessarily be included in the basis since this reactive
+            // might not be exported. Local-only basis roots like these are filtered out when
+            // propagating basis stamps to other network nodes in propagate().
+            basis.roots.insert(
+                ReactiveAddress {
+                    address: ctx.me().clone(),
+                    id,
+                },
+                exclusive_state.prepared_iterations[&id],
+            );
+
             self.reactives.get_mut(&id).unwrap().write(StampedValue {
                 value,
                 basis: basis.clone(),
             });
         }
 
-        for (id, config) in exclusive_state.reactives {
+        for (address, config) in exclusive_state.imports {
             if let Some(config) = config {
-                match self.reactives.entry(id) {
+                match self.imports.entry(address) {
                     hash_map::Entry::Vacant(e) => {
-                        e.insert(Reactive::new(config));
+                        e.insert(Import {
+                            roots: config.roots,
+                            importers: HashSet::new(),
+                        });
                     }
-                    hash_map::Entry::Occupied(mut e) => {
-                        e.get_mut().reconfigure(config);
+                    hash_map::Entry::Occupied(e) => {
+                        e.into_mut().roots = config.roots;
                     }
                 }
-
-                // TOOD: this does not actually force a propagation of this node's value. but we
-                // want to do that. so, need to figure out a way to do that that actually works.
-                modified.insert(id);
-            } else {
-                self.reactives.remove(&id);
+            } else if let Some(removed) = self.imports.remove(&address) {
+                assert!(
+                    removed
+                        .importers
+                        .into_iter()
+                        .all(|id| exclusive_state.reactives.contains_key(&id)),
+                    "not all importers of a removed import {:?} are being updated",
+                    address,
+                );
             }
         }
 
-        // TODO: update imports appropriately
-        // TODO: update subscriptions appropriately
-        // TODO: update roots appropriately
-        // TODO: update topo appropriately
-        //
-        // (lots of computation!)
-        // (this only needs to be done if there were code updates!)
-        // (maybe for this coarse locking strategy an `Upgrade` lock kind would be good!)
-        // (wouldn't really mean anything though, since Upgrade and Exclusive would still be mutex.)
+        let reactives_changed = !exclusive_state.reactives.is_empty();
+
+        for (id, config) in exclusive_state.reactives {
+            if let Some(config) = config {
+                self.iterations.entry(id).or_insert(Iteration::ZERO);
+
+                let (reactive, mut prior_inputs) = match self.reactives.entry(id) {
+                    hash_map::Entry::Vacant(e) => (e.insert(Reactive::new(config)), HashSet::new()),
+                    hash_map::Entry::Occupied(e) => {
+                        let reactive = e.into_mut();
+                        let prior_inputs = reactive.inputs().cloned().collect::<HashSet<_>>();
+                        reactive.reconfigure(config);
+                        (reactive, prior_inputs)
+                    }
+                };
+
+                for input in reactive.inputs() {
+                    if prior_inputs.contains(input) {
+                        prior_inputs.remove(input);
+                        continue;
+                    }
+
+                    if &input.address == ctx.me() {
+                        self.subscriptions
+                            .get_mut(&input.id)
+                            .expect("attempted to reference nonexistent local reactive")
+                            .insert(id);
+                    } else {
+                        self.imports
+                            .get_mut(input)
+                            .expect("attempted to reference nonexistent import")
+                            .importers
+                            .insert(id);
+                    }
+                }
+
+                for removed in prior_inputs {
+                    if &removed.address == ctx.me() {
+                        self.subscriptions.get_mut(&removed.id).unwrap().remove(&id);
+                    } else {
+                        let import = self.imports.get_mut(&removed).unwrap();
+                        import.importers.remove(&id);
+                        if import.importers.is_empty() {
+                            self.imports.remove(&removed);
+                        }
+                    }
+                }
+
+                modified.insert(id);
+            } else if let Some(removed) = self.reactives.remove(&id) {
+                self.iterations.remove(&id);
+
+                for input in removed.inputs() {
+                    if &input.address == ctx.me() {
+                        self.subscriptions.get_mut(&input.id).map(|i| i.remove(&id));
+                    } else {
+                        self.imports.get_mut(input).map(|i| i.importers.remove(&id));
+                    }
+                }
+            }
+        }
+
+        if reactives_changed {
+            self.recompute_topo();
+            self.recompute_roots(&ctx);
+        }
 
         for (id, addrs) in exclusive_state.exports {
             if addrs.is_empty() {
                 self.exports.remove(&id);
             } else {
-                self.exports.insert(id, addrs);
+                self.exports.insert(
+                    id,
+                    Export {
+                        roots: self.roots[&id]
+                            .iter()
+                            .filter(|r| &r.address != ctx.me())
+                            .cloned()
+                            .collect(),
+                        importers: addrs,
+                    },
+                );
             }
         }
+
+        self.iterations.extend(exclusive_state.prepared_iterations);
 
         self.propagate(modified, &ctx);
 
         Some(ctx)
+    }
+
+    fn recompute_topo(&mut self) {
+        let mut visited = HashMap::new();
+        self.topo.clear();
+        for id in self.reactives.keys() {
+            Self::topo_dfs(&self.subscriptions, &mut self.topo, &mut visited, *id)
+                .expect("dependency graph is locally cyclical");
+        }
+    }
+
+    fn topo_dfs(
+        subscriptions: &HashMap<ReactiveId, HashSet<ReactiveId>>,
+        topo: &mut VecDeque<ReactiveId>,
+        visited: &mut HashMap<ReactiveId, bool>,
+        id: ReactiveId,
+    ) -> Result<(), Cyclical> {
+        match visited.get(&id) {
+            Some(true) => return Ok(()),
+            Some(false) => return Err(Cyclical),
+            None => (),
+        }
+
+        visited.insert(id, false);
+
+        for sub in &subscriptions[&id] {
+            Self::topo_dfs(subscriptions, topo, visited, *sub)?;
+        }
+
+        topo.push_front(id);
+        visited.insert(id, true);
+
+        Ok(())
+    }
+
+    fn recompute_roots(&mut self, ctx: &Context) {
+        self.roots.clear();
+        for id in &self.topo {
+            let mut roots = HashSet::new();
+
+            let mut has_inputs = false;
+            for input in self.reactives[id].inputs() {
+                has_inputs = true;
+
+                if &input.address == ctx.me() {
+                    roots.extend(self.roots[&input.id].iter().cloned());
+                } else {
+                    roots.extend(self.imports[input].roots.iter().cloned());
+                }
+            }
+
+            if !has_inputs {
+                roots.insert(ReactiveAddress {
+                    address: ctx.me().clone(),
+                    id: *id,
+                });
+            }
+
+            self.roots.insert(*id, roots);
+        }
+
+        for (id, export) in &mut self.exports {
+            export.roots = self.roots[id]
+                .iter()
+                .filter(|r| &r.address != ctx.me())
+                .cloned()
+                .collect();
+        }
     }
 
     fn preempt(preempted: &mut HashSet<TxId>, txid: &TxId, ctx: &Context) {
@@ -204,11 +375,20 @@ impl Node {
                 }
             }
 
+            let roots = |address: &ReactiveAddress| {
+                if &address.address == ctx.me() {
+                    self.roots.get(&address.id)
+                } else {
+                    self.imports.get(address).map(|i| &i.roots)
+                }
+            };
+
             while let Some(value) = self
                 .reactives
                 .get_mut(id)
                 .unwrap()
-                .process_update(&self.roots)
+                .next_value(roots)
+                .cloned()
             {
                 for sub in self.subscriptions.get(id).unwrap() {
                     self.reactives.get_mut(sub).unwrap().add_update(
@@ -220,7 +400,27 @@ impl Node {
                     );
                 }
 
-                for addr in self.exports.get(id).iter().copied().flatten() {
+                let value_without_local_only_bases = StampedValue {
+                    value: value.value,
+                    basis: BasisStamp {
+                        roots: value
+                            .basis
+                            .roots
+                            .into_iter()
+                            .filter(|(a, _)| {
+                                &a.address != ctx.me() || self.exports.contains_key(&a.id)
+                            })
+                            .collect(),
+                    },
+                };
+
+                for addr in self
+                    .exports
+                    .get(id)
+                    .iter()
+                    .copied()
+                    .flat_map(|e| e.importers.iter())
+                {
                     ctx.send(
                         addr,
                         Message::Propagate {
@@ -228,7 +428,7 @@ impl Node {
                                 address: ctx.me().clone(),
                                 id: *id,
                             },
-                            value: value.clone(),
+                            value: value_without_local_only_bases.clone(),
                         },
                     );
                 }
@@ -248,19 +448,17 @@ impl Node {
                 // Alternatively, we may have already completed a read, but another is pending.
                 if read.complete.is_empty() || !read.pending.is_empty() {
                     if let Some(value) = self.reactives.get(&id).unwrap().value() {
-                        let address = ReactiveAddress {
-                            address: ctx.me().clone(),
-                            id: *id,
-                        };
-
-                        let roots = self.roots.get(&address).unwrap();
+                        let roots = self.roots.get(id).unwrap();
 
                         if read.pending.prec_eq_wrt_roots(&value.basis, roots) {
                             ctx.send(
                                 &txid.address,
                                 Message::ReadResult {
                                     txid: txid.clone(),
-                                    reactive: address,
+                                    reactive: ReactiveAddress {
+                                        address: ctx.me().clone(),
+                                        id: *id,
+                                    },
                                     value: value.clone(),
                                 },
                             );
@@ -315,13 +513,60 @@ impl Actor for Node {
                     .shared(&txid)
                     .expect("attempted to prepare commit for unheld lock");
 
-                let basis = state
-                    .reads
-                    .values()
-                    .fold(BasisStamp::empty(), |mut basis, read| {
-                        basis.merge_from(&read.complete);
-                        basis
-                    });
+                let mut basis =
+                    state
+                        .reads
+                        .values()
+                        .fold(BasisStamp::empty(), |mut basis, read| {
+                            basis.merge_from(&read.complete);
+                            basis
+                        });
+
+                if let Some(exclusive) = self.held.exclusive_mut(&txid) {
+                    // For any direct writes to local reactives, we want to increment the iterations
+                    // of all transitively dependent local reactives, including the written nodes
+                    // themselves.
+                    for id in &self.topo {
+                        if exclusive.writes.contains_key(id) {
+                            exclusive
+                                .prepared_iterations
+                                .insert(*id, self.iterations[id].increment());
+                        } else if self.reactives[id].inputs().any(|input| {
+                            &input.address == ctx.me()
+                                && exclusive.prepared_iterations.contains_key(&input.id)
+                        }) {
+                            exclusive
+                                .prepared_iterations
+                                .insert(*id, self.iterations[id].increment());
+                        }
+                    }
+
+                    // Only include exported reactives as roots in the basis. Note that we have to
+                    // take care to respect the set of exports that will be set following commit of
+                    // the transaction, rather than the current self.exports.
+                    basis.roots.extend(
+                        exclusive
+                            .prepared_iterations
+                            .iter()
+                            .filter(|(id, _)| {
+                                exclusive
+                                    .exports
+                                    .get(id)
+                                    .map_or(self.exports.contains_key(id), |export| {
+                                        !export.is_empty()
+                                    })
+                            })
+                            .map(|(id, iter)| {
+                                (
+                                    ReactiveAddress {
+                                        address: ctx.me().clone(),
+                                        id: *id,
+                                    },
+                                    *iter,
+                                )
+                            }),
+                    );
+                }
 
                 // TODO: **comprehensively** validate the update (ideally equivalent to fully
                 // executing it), perhaps by doing it and adding an 'undo log' entry, so that no
@@ -348,7 +593,7 @@ impl Actor for Node {
 
                         if let Some(data) = data {
                             if let Some(returned) =
-                                self.apply_changes(basis, data, ExclusiveLockState::default(), ctx)
+                                self.commit(basis, data, ExclusiveLockState::default(), ctx)
                             {
                                 ctx = returned;
                             } else {
@@ -361,7 +606,7 @@ impl Actor for Node {
                     HeldLocks::Exclusive(held_txid, shared_data, exclusive_data) => {
                         if held_txid == txid {
                             if let Some(returned) =
-                                self.apply_changes(basis, shared_data, exclusive_data, ctx)
+                                self.commit(basis, shared_data, exclusive_data, ctx)
                             {
                                 ctx = returned;
                             } else {
@@ -407,15 +652,7 @@ impl Actor for Node {
                 });
 
                 if let Some(value) = r.value() {
-                    if basis.prec_eq_wrt_roots(
-                        &value.basis,
-                        self.roots
-                            .get(&ReactiveAddress {
-                                address: ctx.me().clone(),
-                                id: reactive,
-                            })
-                            .unwrap(),
-                    ) {
+                    if basis.prec_eq_wrt_roots(&value.basis, self.roots.get(&reactive).unwrap()) {
                         ctx.send(
                             &txid.address,
                             Message::ReadResult {
@@ -448,8 +685,21 @@ impl Actor for Node {
                 assert!(self.reactives.contains_key(&reactive));
                 state.writes.insert(reactive, value);
             }
+            Message::ReadConfiguration { txid } => {
+                self.held
+                    .exclusive(&txid)
+                    .expect("attempted to read configuration without an exclusive lock");
+
+                ctx.send(
+                    &txid.address,
+                    Message::ReadConfigurationResult {
+                        imports: self.imports.clone(),
+                    },
+                );
+            }
             Message::Configure {
                 txid,
+                imports,
                 reactives,
                 exports,
             } => {
@@ -457,22 +707,23 @@ impl Actor for Node {
                     .held
                     .exclusive_mut(&txid)
                     .expect("attempted to configure without an exclusive lock");
+                state.imports.extend(imports);
                 state.reactives.extend(reactives);
                 state.exports.extend(exports);
             }
             Message::Propagate { sender, value } => {
-                let Some(importers) = self.imports.get(&sender) else {
+                let Some(import) = self.imports.get(&sender) else {
                     return;
                 };
 
-                for id in importers {
+                for id in &import.importers {
                     self.reactives
-                        .get_mut(id)
+                        .get_mut(&id)
                         .unwrap()
                         .add_update(sender.clone(), value.clone());
                 }
 
-                self.propagate(importers.clone(), &ctx);
+                self.propagate(import.importers.clone(), &ctx);
             }
             _ => todo!(),
         }

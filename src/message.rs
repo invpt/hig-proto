@@ -7,7 +7,7 @@ use std::{
 use crate::{
     actor::{Address, Version},
     expr::{Action, Expr, Name, Type, Upgrade, Value},
-    node::{ReactiveAddress, ReactiveId},
+    node::{Import, ReactiveAddress, ReactiveId},
 };
 
 #[derive(Clone)]
@@ -51,13 +51,20 @@ pub enum Message {
         reactive: ReactiveId,
         value: Value,
     },
-    Retire {
+    ReadConfiguration {
         txid: TxId,
+    },
+    ReadConfigurationResult {
+        imports: HashMap<ReactiveAddress, Import>,
     },
     Configure {
         txid: TxId,
+        imports: HashMap<ReactiveAddress, Option<ImportConfiguration>>,
         reactives: HashMap<ReactiveId, Option<ReactiveConfiguration>>,
         exports: HashMap<ReactiveId, HashSet<Address>>,
+    },
+    Retire {
+        txid: TxId,
     },
 
     // transaction - messages related to ending the lock
@@ -89,6 +96,11 @@ pub enum Message {
     Directory {
         state: DirectoryState,
     },
+}
+
+#[derive(Clone)]
+pub struct ImportConfiguration {
+    pub roots: HashSet<ReactiveAddress>,
 }
 
 #[derive(Clone)]
@@ -225,8 +237,8 @@ impl MonotonicTimestampGenerator {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy)]
 pub enum LockKind {
-    Shared = 0,
-    Exclusive = 1,
+    Shared,
+    Exclusive,
 }

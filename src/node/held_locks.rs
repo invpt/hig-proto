@@ -3,10 +3,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::{
     actor::Address,
     expr::Value,
-    message::{BasisStamp, ReactiveConfiguration, TxId},
+    message::{BasisStamp, ImportConfiguration, Iteration, ReactiveConfiguration, TxId},
 };
 
-use super::ReactiveId;
+use super::{ReactiveAddress, ReactiveId};
 
 pub enum HeldLocks {
     None,
@@ -27,8 +27,10 @@ pub struct Read {
 #[derive(Default)]
 pub struct ExclusiveLockState {
     pub writes: HashMap<ReactiveId, Value>,
+    pub imports: HashMap<ReactiveAddress, Option<ImportConfiguration>>,
     pub reactives: HashMap<ReactiveId, Option<ReactiveConfiguration>>,
     pub exports: HashMap<ReactiveId, HashSet<Address>>,
+    pub prepared_iterations: HashMap<ReactiveId, Iteration>,
 }
 
 impl HeldLocks {

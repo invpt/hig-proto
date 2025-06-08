@@ -11,6 +11,8 @@ pub struct Reactive {
     definition: Option<Definition>,
     value: Option<StampedValue>,
     read_by: BasisStamp,
+
+    changed: bool,
 }
 
 impl Reactive {
@@ -19,11 +21,13 @@ impl Reactive {
             definition: None,
             value: None,
             read_by: BasisStamp::empty(),
+            changed: false,
         };
 
         match config {
             ReactiveConfiguration::Variable { value } => {
                 reactive.value = Some(value);
+                reactive.changed = true;
             }
             ReactiveConfiguration::Definition { expr } => {
                 reactive.definition = Some(Definition::new(expr));
@@ -33,7 +37,7 @@ impl Reactive {
         reactive
     }
 
-    pub fn reconfigure(&mut self, config: ReactiveConfiguration) -> Option<StampedValue> {
+    pub fn reconfigure(&mut self, config: ReactiveConfiguration) {
         match config {
             ReactiveConfiguration::Variable { value } => {
                 self.definition = None;
@@ -51,7 +55,7 @@ impl Reactive {
             }
         }
 
-        self.value.clone()
+        self.changed = true;
     }
 
     pub fn inputs(&self) -> impl Iterator<Item = &ReactiveAddress> {
@@ -66,15 +70,27 @@ impl Reactive {
         }
     }
 
-    pub fn process_update(
+    pub fn next_value<'a>(
         &mut self,
-        roots: &HashMap<ReactiveAddress, HashSet<ReactiveAddress>>,
-    ) -> Option<StampedValue> {
-        if let Some(definition) = &mut self.definition {
-            definition.find_and_apply_batch(roots)
-        } else {
-            None
+        roots: impl Fn(&ReactiveAddress) -> Option<&'a HashSet<ReactiveAddress>>,
+    ) -> Option<&StampedValue> {
+        if self.changed {
+            self.changed = false;
+
+            if self.value.is_some() {
+                return self.value.as_ref();
+            }
         }
+
+        if let Some(definition) = &mut self.definition {
+            if let Some(new_value) = definition.find_and_apply_batch(roots) {
+                self.value = Some(new_value);
+
+                return self.value.as_ref();
+            }
+        }
+
+        None
     }
 
     pub fn value(&self) -> Option<&StampedValue> {
@@ -90,6 +106,7 @@ impl Reactive {
         value.basis.merge_from(&self.read_by);
         self.value = Some(value);
         self.read_by.clear();
+        self.changed = true;
     }
 }
 
@@ -136,7 +153,7 @@ impl Definition {
         self.expr = expr;
     }
 
-    pub fn compute(&self) -> Option<StampedValue> {
+    fn compute(&self) -> Option<StampedValue> {
         let mut expr = self.expr.clone();
         expr.eval(&mut EvalContext(&self.inputs));
         let Expr::Value(value) = expr else {
@@ -164,9 +181,9 @@ impl Definition {
             .push(value);
     }
 
-    fn find_and_apply_batch(
+    fn find_and_apply_batch<'a>(
         &mut self,
-        roots: &HashMap<ReactiveAddress, HashSet<ReactiveAddress>>,
+        roots: impl Fn(&ReactiveAddress) -> Option<&'a HashSet<ReactiveAddress>>,
     ) -> Option<StampedValue> {
         let mut found = None;
 
@@ -179,7 +196,9 @@ impl Definition {
                     (
                         address,
                         BatchInput {
-                            roots: roots.get(address).unwrap().clone(),
+                            roots: roots(address)
+                                .expect("input is locally inaccessible")
+                                .clone(),
                             basis: input
                                 .value
                                 .as_ref()
