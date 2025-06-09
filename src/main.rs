@@ -1,6 +1,6 @@
 mod actor;
 mod expr;
-//mod manager; // will have to port/update this later
+mod manager;
 mod message;
 mod node;
 

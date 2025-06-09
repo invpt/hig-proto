@@ -1,4 +1,4 @@
-use crate::actor::VersionedAddress;
+use crate::node::VersionedReactiveAddress;
 
 pub mod eval;
 
@@ -12,7 +12,7 @@ pub enum Upgrade {
     Seq(Box<Upgrade>, Box<Upgrade>),
     Var(Ident, Expr<Ident>),
     Def(Ident, Expr<Ident>),
-    Del(VersionedAddress),
+    Del(VersionedReactiveAddress),
     Nil,
     // NOTE: control flow for upgrades is not planned
 }
@@ -20,17 +20,17 @@ pub enum Upgrade {
 #[derive(Clone, Hash, PartialEq, Eq)]
 pub enum Ident {
     New(Name),
-    Existing(VersionedAddress),
+    Existing(VersionedReactiveAddress),
 }
 
-impl From<VersionedAddress> for Ident {
-    fn from(value: VersionedAddress) -> Self {
+impl From<VersionedReactiveAddress> for Ident {
+    fn from(value: VersionedReactiveAddress) -> Self {
         Ident::Existing(value)
     }
 }
 
 #[derive(Clone)]
-pub enum Expr<Ident = VersionedAddress> {
+pub enum Expr<Ident = VersionedReactiveAddress> {
     // TODO: more exprs
     Tuple(Box<[Expr<Ident>]>),
     Read(Ident),
@@ -40,7 +40,7 @@ pub enum Expr<Ident = VersionedAddress> {
 #[derive(Clone)]
 pub enum Action {
     Seq(Box<Action>, Box<Action>),
-    Write(VersionedAddress, Expr<VersionedAddress>),
+    Write(VersionedReactiveAddress, Expr<VersionedReactiveAddress>),
     Nil,
     // TODO: control flow
 }

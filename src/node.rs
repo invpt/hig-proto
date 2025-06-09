@@ -4,7 +4,7 @@ use held_locks::{ExclusiveLockState, HeldLocks, Read, SharedLockState};
 use reactive::Reactive;
 
 use crate::{
-    actor::{Actor, Address, Context},
+    actor::{Actor, Address, Context, Version},
     message::{BasisStamp, Iteration, LockKind, Message, StampedValue, TxId},
 };
 
@@ -24,6 +24,13 @@ pub struct Node {
     subscriptions: HashMap<ReactiveId, HashSet<ReactiveId>>,
     roots: HashMap<ReactiveId, HashSet<ReactiveAddress>>,
     topo: VecDeque<ReactiveId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct VersionedReactiveAddress {
+    pub address: Address,
+    pub id: ReactiveId,
+    pub version: Version,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

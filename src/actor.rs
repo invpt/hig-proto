@@ -46,12 +46,6 @@ pub struct Address {
     index: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct VersionedAddress {
-    pub address: Address,
-    pub version: Version,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Version(usize);
 
