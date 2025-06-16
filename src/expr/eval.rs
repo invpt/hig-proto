@@ -80,17 +80,17 @@ impl Upgrade {
         }
     }
 
-    pub fn visit_reads(&self, mut visitor: impl FnMut(&Ident, bool)) {
+    pub fn visit_reads(&self, visitor: &mut impl FnMut(&Ident, bool)) {
         match self {
             Upgrade::Seq(a, b) => {
-                a.visit_reads(&mut visitor);
-                b.visit_reads(&mut visitor);
+                a.visit_reads(visitor);
+                b.visit_reads(visitor);
             }
             Upgrade::Var(.., expr) => {
                 expr.visit_reads(visitor);
             }
             Upgrade::Def(.., expr) => {
-                expr.visit_reads(|ident, _definite| visitor(ident, false));
+                expr.visit_reads(&mut |ident, _definite| visitor(ident, false));
             }
             Upgrade::Del(..) => {}
             Upgrade::Nil => {}
@@ -143,11 +143,11 @@ impl Action {
     }
 
     /// Traverses the action, calling the callback with each VersionedAddress the Action might read from.
-    pub fn visit_reads(&self, mut visitor: impl FnMut(&VersionedReactiveAddress, bool)) {
+    pub fn visit_reads(&self, visitor: &mut impl FnMut(&VersionedReactiveAddress, bool)) {
         match self {
             Action::Seq(a, b) => {
-                a.visit_reads(&mut visitor);
-                b.visit_reads(&mut visitor);
+                a.visit_reads(visitor);
+                b.visit_reads(visitor);
             }
             Action::Write(_, expr) => {
                 expr.visit_reads(visitor);
@@ -198,11 +198,11 @@ impl<Ident> Expr<Ident> {
     }
 
     /// Traverses the expression, calling the callback with each Ident the Expr might read from.
-    pub fn visit_reads(&self, mut visitor: impl FnMut(&Ident, bool)) {
+    pub fn visit_reads(&self, visitor: &mut impl FnMut(&Ident, bool)) {
         match self {
             Expr::Tuple(items) => {
                 for item in items {
-                    item.visit_reads(&mut visitor);
+                    item.visit_reads(visitor);
                 }
             }
             Expr::Read(ident) => visitor(ident, true),

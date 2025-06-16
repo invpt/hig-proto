@@ -2,12 +2,12 @@ use crate::node::VersionedReactiveAddress;
 
 pub mod eval;
 
-#[derive(Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Name {
     pub text: String,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum Upgrade {
     Seq(Box<Upgrade>, Box<Upgrade>),
     Var(Ident, Expr<Ident>),
@@ -17,7 +17,7 @@ pub enum Upgrade {
     // NOTE: control flow for upgrades is not planned
 }
 
-#[derive(Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum Ident {
     New(Name),
     Existing(VersionedReactiveAddress),
@@ -29,7 +29,7 @@ impl From<VersionedReactiveAddress> for Ident {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum Expr<Ident = VersionedReactiveAddress> {
     // TODO: more exprs
     Tuple(Box<[Expr<Ident>]>),
@@ -37,7 +37,7 @@ pub enum Expr<Ident = VersionedReactiveAddress> {
     Value(Value),
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum Action {
     Seq(Box<Action>, Box<Action>),
     Write(VersionedReactiveAddress, Expr<VersionedReactiveAddress>),

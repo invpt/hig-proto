@@ -10,7 +10,7 @@ use crate::{
     node::{Import, ReactiveAddress, ReactiveId},
 };
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum Message {
     // messages sent by the system itself
     Unreachable {
@@ -78,6 +78,7 @@ pub enum Message {
         txid: TxId,
     },
     CommitPrepared {
+        address: Address,
         txid: TxId,
         basis: BasisStamp,
     },
@@ -98,18 +99,18 @@ pub enum Message {
     },
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ImportConfiguration {
     pub roots: HashSet<ReactiveAddress>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct StampedValue {
     pub value: Value,
     pub basis: BasisStamp,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct BasisStamp {
     pub roots: HashMap<ReactiveAddress, Iteration>,
 }
@@ -161,7 +162,7 @@ impl BasisStamp {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Iteration(usize);
 
 impl Iteration {
@@ -173,13 +174,13 @@ impl Iteration {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum ReactiveConfiguration {
     Variable { value: StampedValue },
     Definition { expr: Expr<ReactiveAddress> },
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct DirectoryState {
     pub managers: HashMap<Address, bool>,
 

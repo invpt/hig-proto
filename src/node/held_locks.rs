@@ -24,7 +24,7 @@ pub struct Read {
     pub complete: BasisStamp,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct ExclusiveLockState {
     pub writes: HashMap<ReactiveId, Value>,
     pub imports: HashMap<ReactiveAddress, Option<ImportConfiguration>>,

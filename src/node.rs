@@ -40,9 +40,9 @@ pub struct ReactiveAddress {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ReactiveId(usize);
+pub struct ReactiveId(pub usize);
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Import {
     pub roots: HashSet<ReactiveAddress>,
     pub importers: HashSet<ReactiveId>,
@@ -209,6 +209,7 @@ impl Node {
 
         for (id, config) in exclusive_state.reactives {
             if let Some(config) = config {
+                self.subscriptions.entry(id).or_insert_with(HashSet::new);
                 self.iterations.entry(id).or_insert(Iteration::ZERO);
 
                 let (reactive, mut prior_inputs) = match self.reactives.entry(id) {
@@ -229,8 +230,8 @@ impl Node {
 
                     if &input.address == ctx.me() {
                         self.subscriptions
-                            .get_mut(&input.id)
-                            .expect("attempted to reference nonexistent local reactive")
+                            .entry(input.id)
+                            .or_insert_with(HashSet::new)
                             .insert(id);
                     } else {
                         self.imports
@@ -397,6 +398,7 @@ impl Node {
                 .next_value(roots)
                 .cloned()
             {
+                println!("new value for {id:?} on {:?}: {value:?}", ctx.me());
                 for sub in self.subscriptions.get(id).unwrap() {
                     self.reactives.get_mut(sub).unwrap().add_update(
                         ReactiveAddress {
@@ -582,6 +584,7 @@ impl Actor for Node {
                 ctx.send(
                     &txid.address,
                     Message::CommitPrepared {
+                        address: ctx.me().clone(),
                         txid: txid.clone(),
                         basis,
                     },

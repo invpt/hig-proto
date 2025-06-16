@@ -25,20 +25,24 @@ pub struct Context<'a> {
 pub trait ActorConfiguration {
     type Actor: Actor + 'static;
 
-    fn create(self, ctx: Context) -> Self::Actor;
+    fn spawn(self, ctx: Context) -> Self::Actor;
 }
 
 // If an actor doesn't need access to a context when it is created, it can be spawned directly.
 impl<A: Actor + 'static> ActorConfiguration for A {
     type Actor = A;
 
-    fn create(self, _ctx: Context) -> A {
+    fn spawn(self, _ctx: Context) -> A {
         self
     }
 }
 
 pub trait Actor: Send {
     fn handle(&mut self, message: Message, ctx: Context);
+}
+
+impl Actor for () {
+    fn handle(&mut self, _message: Message, _ctx: Context) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -100,19 +104,23 @@ impl System {
             );
 
             if let Some(entry) = self.actors.get_mut(&queued.target) {
-                *entry = Some(actor);
+                if entry.is_none() {
+                    *entry = Some(actor);
+                } else {
+                    // This means the actor already transformed into another via `shift`
+                }
             }
         }
     }
 
-    pub fn spawn<C: ActorConfiguration>(&mut self, configuration: C) -> Address {
+    pub fn spawn(&mut self, configuration: impl ActorConfiguration) -> Address {
         let address = Address {
             index: self.address_counter,
         };
         self.address_counter += 1;
 
         self.actors.insert(address.clone(), None);
-        let actor = Box::new(configuration.create(Context {
+        let actor = Box::new(configuration.spawn(Context {
             system: RefCell::new(self),
             me: address.clone(),
         }));
@@ -141,12 +149,20 @@ impl<'a> Context<'a> {
     }
 
     /// Spawns a new actor.
-    pub fn spawn<C: ActorConfiguration>(&self, configuration: C) -> Address {
+    pub fn spawn(&self, configuration: impl ActorConfiguration) -> Address {
         self.system.borrow_mut().spawn(configuration)
     }
 
     /// Retires this actor, meaning it will no longer be asked to handle messages.
     pub fn retire(self) {
         self.system.borrow_mut().actors.remove(&self.me);
+    }
+
+    /// Replaces self with the given actor.
+    pub fn shift(self, actor: impl Actor + 'static) {
+        self.system
+            .borrow_mut()
+            .actors
+            .insert(self.me, Some(Box::new(actor)));
     }
 }

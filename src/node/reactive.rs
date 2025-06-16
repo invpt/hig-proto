@@ -115,6 +115,7 @@ struct Definition {
     expr: Expr<ReactiveAddress>,
 }
 
+#[derive(Debug)]
 struct Input {
     value: Option<StampedValue>,
     updates: Vec<StampedValue>,
@@ -122,6 +123,7 @@ struct Input {
 
 struct EvalContext<'a>(&'a HashMap<ReactiveAddress, Input>);
 
+#[derive(Debug)]
 struct BatchInput<'a> {
     roots: HashSet<ReactiveAddress>,
     basis: BasisStamp,
@@ -133,7 +135,7 @@ impl Definition {
     pub fn new(expr: Expr<ReactiveAddress>) -> Definition {
         let mut inputs = HashMap::new();
 
-        expr.visit_reads(|address, _| {
+        expr.visit_reads(&mut |address, _| {
             inputs.insert(address.clone(), Input::new());
         });
 
@@ -142,7 +144,7 @@ impl Definition {
 
     pub fn reconfigure(&mut self, expr: Expr<ReactiveAddress>) {
         let mut referenced_inputs = HashSet::new();
-        expr.visit_reads(|address, _| {
+        expr.visit_reads(&mut |address, _| {
             referenced_inputs.insert(address.clone());
             self.inputs
                 .entry(address.clone())
@@ -208,12 +210,12 @@ impl Definition {
                             // sidered as a seed. Since it was considered already, we know there
                             // are definitely no valid batches available now that involve this
                             // input.
-                            remaining_updates: if explored.contains(address) {
+                            remaining_updates: if !explored.contains(address) {
                                 &*input.updates
                             } else {
                                 &[]
                             },
-                            update_count: if explored.contains(address) {
+                            update_count: if !explored.contains(address) {
                                 input.updates.len()
                             } else {
                                 0
