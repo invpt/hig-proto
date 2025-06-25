@@ -6,8 +6,8 @@ use std::{
 
 use crate::{
     actor::{Address, Version},
-    expr::{Action, Expr, Name, Type, Upgrade, Value},
-    node::{Import, ReactiveAddress, ReactiveId},
+    expr::{Action, Expr, Name, TransactionKind, Type, Upgrade, Value},
+    node::{Export, Import, ReactiveAddress, ReactiveId},
 };
 
 #[derive(Debug, Clone)]
@@ -31,15 +31,16 @@ pub enum Message {
     LockGranted {
         txid: TxId,
         address: Address,
+        reactives: HashMap<ReactiveId, Version>,
     },
 
     // transaction - messages available to shared and exclusive locks
-    Read {
+    ReadValue {
         txid: TxId,
         reactive: ReactiveId,
         basis: BasisStamp,
     },
-    ReadResult {
+    ReturnedValue {
         txid: TxId,
         reactive: ReactiveAddress,
         value: StampedValue,
@@ -54,8 +55,13 @@ pub enum Message {
     ReadConfiguration {
         txid: TxId,
     },
-    ReadConfigurationResult {
+    ReturnedConfiguration {
+        txid: TxId,
+        address: Address,
         imports: HashMap<ReactiveAddress, Import>,
+        exports: HashMap<ReactiveId, Export>,
+        subscriptions: HashMap<ReactiveId, HashSet<ReactiveId>>,
+        roots: HashMap<ReactiveId, HashSet<ReactiveAddress>>,
     },
     Configure {
         txid: TxId,
@@ -89,10 +95,7 @@ pub enum Message {
 
     // messages sent/received by managers
     Do {
-        action: Action,
-    },
-    Upgrade {
-        upgrade: Upgrade,
+        transaction: TransactionKind,
     },
     Directory {
         state: DirectoryState,
@@ -238,7 +241,7 @@ impl MonotonicTimestampGenerator {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockKind {
     Shared,
     Exclusive,

@@ -1,6 +1,9 @@
 use std::mem;
 
-use crate::{actor::Address, expr::Value, node::VersionedReactiveAddress};
+use crate::{
+    expr::{TransactionKind, UpgradeItem, Value},
+    node::VersionedReactiveAddress,
+};
 
 use super::{Action, Expr, Ident, Upgrade};
 
@@ -17,83 +20,70 @@ pub trait ActionEvalContext: ExprEvalContext<VersionedReactiveAddress> {
     fn write(&mut self, address: &VersionedReactiveAddress, value: &Value) -> bool;
 }
 
-pub trait ExprEvalContext<Ident = Address> {
+pub trait ExprEvalContext<Ident = VersionedReactiveAddress> {
     /// Reads the value held by the node referenced by `ident`.
     ///
     /// If the value is not yet ready, this function will return `None` instead of a value.
     fn read(&mut self, ident: &Ident) -> Option<&Value>;
 }
 
+impl TransactionKind {
+    pub fn eval(&mut self, ctx: &mut (impl ActionEvalContext + UpgradeEvalContext)) {
+        match self {
+            TransactionKind::Action(action) => action.eval(ctx),
+            TransactionKind::Upgrade(upgrade) => upgrade.eval(ctx),
+        }
+    }
+}
+
 impl Upgrade {
     pub fn eval(&mut self, ctx: &mut impl UpgradeEvalContext) {
-        match self {
-            Upgrade::Seq(a, b) => {
-                a.eval(ctx);
-                if let Upgrade::Nil = &**a {
-                    b.eval(ctx);
+        while !self.items.is_empty() {
+            match self.items.first_mut().unwrap() {
+                UpgradeItem::Var(_, expr) => {
+                    expr.eval(ctx);
 
-                    *self = mem::replace(b, Upgrade::Nil);
+                    if let Expr::Value(_) = expr {
+                        let UpgradeItem::Var(ident, Expr::Value(value)) = self.items.remove(0)
+                        else {
+                            unreachable!()
+                        };
+
+                        ctx.var(ident, value);
+                    } else {
+                        panic!("var expr could not be fully evaluated")
+                    }
                 }
-            }
-            Upgrade::Var(_, expr) => {
-                expr.eval(ctx);
-
-                if let Expr::Value(_) = expr {
-                    let Upgrade::Var(ident, Expr::Value(value)) = mem::replace(self, Upgrade::Nil)
-                    else {
+                UpgradeItem::Def(..) => {
+                    let UpgradeItem::Def(ident, expr) = self.items.remove(0) else {
                         unreachable!()
                     };
 
-                    ctx.var(ident, value);
-                } else {
-                    panic!("var expr could not be fully evaluated")
+                    ctx.def(ident, expr);
+                }
+                UpgradeItem::Del(_) => {
+                    let UpgradeItem::Del(address) = self.items.remove(0) else {
+                        unreachable!()
+                    };
+
+                    ctx.del(address);
                 }
             }
-            Upgrade::Def(..) => {
-                let Upgrade::Def(ident, expr) = mem::replace(self, Upgrade::Nil) else {
-                    unreachable!()
-                };
-
-                ctx.def(ident, expr);
-            }
-            Upgrade::Del(_) => {
-                let Upgrade::Del(address) = mem::replace(self, Upgrade::Nil) else {
-                    unreachable!()
-                };
-
-                ctx.del(address);
-            }
-            Upgrade::Nil => {}
-        }
-    }
-
-    pub fn visit_upgrades(&self, mut visitor: impl FnMut(&VersionedReactiveAddress)) {
-        match self {
-            Upgrade::Seq(a, b) => {
-                a.visit_upgrades(&mut visitor);
-                b.visit_upgrades(&mut visitor);
-            }
-            Upgrade::Var(Ident::Existing(address), _) => visitor(address),
-            Upgrade::Def(Ident::Existing(address), _) => visitor(address),
-            Upgrade::Del(address) => visitor(address),
-            _ => {}
         }
     }
 
     pub fn visit_reads(&self, visitor: &mut impl FnMut(&Ident, bool)) {
-        match self {
-            Upgrade::Seq(a, b) => {
-                a.visit_reads(visitor);
-                b.visit_reads(visitor);
+        for item in &self.items {
+            match item {
+                UpgradeItem::Var(.., expr) => {
+                    expr.visit_reads(visitor);
+                }
+                UpgradeItem::Def(.., expr) => {
+                    expr.visit_reads(&mut |ident, _definite| visitor(ident, false));
+                }
+                UpgradeItem::Del(..) => {}
+                _ => (),
             }
-            Upgrade::Var(.., expr) => {
-                expr.visit_reads(visitor);
-            }
-            Upgrade::Def(.., expr) => {
-                expr.visit_reads(&mut |ident, _definite| visitor(ident, false));
-            }
-            Upgrade::Del(..) => {}
-            Upgrade::Nil => {}
         }
     }
 }
@@ -129,11 +119,11 @@ impl Action {
     }
 
     /// Traverses the expression, calling the callback with each VersionedAddress the Action might write to.
-    pub fn visit_writes(&self, mut visitor: impl FnMut(&VersionedReactiveAddress, bool)) {
+    pub fn visit_writes(&self, visitor: &mut impl FnMut(&VersionedReactiveAddress, bool)) {
         match self {
             Action::Seq(a, b) => {
-                a.visit_writes(&mut visitor);
-                b.visit_writes(&mut visitor);
+                a.visit_writes(visitor);
+                b.visit_writes(visitor);
             }
             Action::Write(ident, _) => {
                 visitor(ident, true);
@@ -158,6 +148,23 @@ impl Action {
 }
 
 impl<Ident> Expr<Ident> {
+    pub fn resolve<OtherIdent>(
+        self,
+        resolve: &mut impl FnMut(Ident) -> OtherIdent,
+    ) -> Expr<OtherIdent> {
+        match self {
+            Expr::Read(ident) => Expr::Read(resolve(ident)),
+            Expr::Tuple(items) => Expr::Tuple(
+                items
+                    .into_vec()
+                    .into_iter()
+                    .map(|e| e.resolve(resolve))
+                    .collect(),
+            ),
+            Expr::Value(value) => Expr::Value(value),
+        }
+    }
+
     /// Evaluates this expression.
     ///
     /// When `self` is an [`Expr::Value`], no further evaulation will be done.

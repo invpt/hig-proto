@@ -1,6 +1,15 @@
-use crate::node::VersionedReactiveAddress;
+use crate::{
+    actor::{Address, Version},
+    node::{ReactiveId, VersionedReactiveAddress},
+};
 
 pub mod eval;
+
+#[derive(Debug, Clone)]
+pub enum TransactionKind {
+    Action(Action),
+    Upgrade(Upgrade),
+}
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Name {
@@ -8,19 +17,60 @@ pub struct Name {
 }
 
 #[derive(Debug, Clone)]
-pub enum Upgrade {
-    Seq(Box<Upgrade>, Box<Upgrade>),
+pub struct Upgrade {
+    pub items: Vec<UpgradeItem>,
+}
+
+#[derive(Debug, Clone)]
+pub enum UpgradeItem {
     Var(Ident, Expr<Ident>),
     Def(Ident, Expr<Ident>),
     Del(VersionedReactiveAddress),
-    Nil,
-    // NOTE: control flow for upgrades is not planned
+}
+
+impl UpgradeItem {
+    pub fn expected_reactive(&self) -> Option<(ReactiveId, Version)> {
+        match self {
+            UpgradeItem::Var(ident, _) => match ident {
+                Ident::New(..) => None,
+                Ident::Existing(address) => Some((address.id, address.version)),
+            },
+            UpgradeItem::Def(ident, _) => match ident {
+                Ident::New(..) => None,
+                Ident::Existing(address) => Some((address.id, address.version)),
+            },
+            UpgradeItem::Del(address) => Some((address.id, address.version)),
+        }
+    }
+
+    pub fn address(&self) -> &Address {
+        match self {
+            UpgradeItem::Var(ident, _) => match ident {
+                Ident::New(address, _) => address,
+                Ident::Existing(address) => &address.address,
+            },
+            UpgradeItem::Def(ident, _) => match ident {
+                Ident::New(address, _) => address,
+                Ident::Existing(address) => &address.address,
+            },
+            UpgradeItem::Del(address) => &address.address,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum Ident {
-    New(Name),
+    New(Address, Name),
     Existing(VersionedReactiveAddress),
+}
+
+impl Ident {
+    pub fn address(&self) -> &Address {
+        match self {
+            Ident::New(address, _) => address,
+            Ident::Existing(address) => &address.address,
+        }
+    }
 }
 
 impl From<VersionedReactiveAddress> for Ident {

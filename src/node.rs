@@ -48,6 +48,7 @@ pub struct Import {
     pub importers: HashSet<ReactiveId>,
 }
 
+#[derive(Debug, Clone)]
 pub struct Export {
     /// Exports' roots only contain cross-network roots, since they are themselves sources standing
     /// in for each of the local reactive state variables (if any).
@@ -138,6 +139,11 @@ impl Node {
                 Message::LockGranted {
                     txid: txid.clone(),
                     address: ctx.me().clone(),
+                    reactives: self
+                        .reactives
+                        .iter()
+                        .map(|(id, r)| (*id, r.version()))
+                        .collect(),
                 },
             );
         }
@@ -398,7 +404,7 @@ impl Node {
                 .next_value(roots)
                 .cloned()
             {
-                println!("new value for {id:?} on {:?}: {value:?}", ctx.me());
+                println!("new value for {id:?} on {:?}:\n    {value:?}\n", ctx.me());
                 for sub in self.subscriptions.get(id).unwrap() {
                     self.reactives.get_mut(sub).unwrap().add_update(
                         ReactiveAddress {
@@ -462,7 +468,7 @@ impl Node {
                         if read.pending.prec_eq_wrt_roots(&value.basis, roots) {
                             ctx.send(
                                 &txid.address,
-                                Message::ReadResult {
+                                Message::ReturnedValue {
                                     txid: txid.clone(),
                                     reactive: ReactiveAddress {
                                         address: ctx.me().clone(),
@@ -634,7 +640,7 @@ impl Actor for Node {
 
                 self.grant_locks(&ctx);
             }
-            Message::Read {
+            Message::ReadValue {
                 txid,
                 reactive,
                 basis,
@@ -665,7 +671,7 @@ impl Actor for Node {
                     if basis.prec_eq_wrt_roots(&value.basis, self.roots.get(&reactive).unwrap()) {
                         ctx.send(
                             &txid.address,
-                            Message::ReadResult {
+                            Message::ReturnedValue {
                                 txid: txid.clone(),
                                 reactive: ReactiveAddress {
                                     address: ctx.me().clone(),
@@ -702,8 +708,13 @@ impl Actor for Node {
 
                 ctx.send(
                     &txid.address,
-                    Message::ReadConfigurationResult {
+                    Message::ReturnedConfiguration {
+                        txid: txid.clone(),
+                        address: ctx.me().clone(),
                         imports: self.imports.clone(),
+                        subscriptions: self.subscriptions.clone(),
+                        roots: self.roots.clone(),
+                        exports: self.exports.clone(),
                     },
                 );
             }

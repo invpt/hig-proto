@@ -88,7 +88,11 @@ impl ActorConfiguration for ScenarioConfiguration {
 impl Actor for Scenario {
     fn handle(&mut self, message: Message, ctx: actor::Context) {
         match message {
-            Message::LockGranted { txid, address } => {
+            Message::LockGranted {
+                txid,
+                address,
+                reactives: _,
+            } => {
                 assert_eq!(&txid, &self.txid);
                 if &address == &self.node1 {
                     assert_eq!(&address, &self.node1);
@@ -222,7 +226,11 @@ impl Actor for Scenario {
 impl Actor for Stage2 {
     fn handle(&mut self, message: Message, ctx: Context) {
         match message {
-            Message::LockGranted { txid, address } => {
+            Message::LockGranted {
+                txid,
+                address,
+                reactives: _,
+            } => {
                 assert_eq!(address, self.node1);
                 assert_eq!(txid, self.txid);
                 ctx.send(

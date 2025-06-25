@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
+    actor::Version,
     expr::{eval::ExprEvalContext, Expr, Value},
     message::{BasisStamp, ReactiveConfiguration, StampedValue},
 };
@@ -13,6 +14,7 @@ pub struct Reactive {
     read_by: BasisStamp,
 
     changed: bool,
+    version: Version,
 }
 
 impl Reactive {
@@ -22,6 +24,7 @@ impl Reactive {
             value: None,
             read_by: BasisStamp::empty(),
             changed: false,
+            version: Version::ZERO,
         };
 
         match config {
@@ -56,6 +59,7 @@ impl Reactive {
         }
 
         self.changed = true;
+        self.version = self.version.increment();
     }
 
     pub fn inputs(&self) -> impl Iterator<Item = &ReactiveAddress> {
@@ -107,6 +111,10 @@ impl Reactive {
         self.value = Some(value);
         self.read_by.clear();
         self.changed = true;
+    }
+
+    pub fn version(&self) -> Version {
+        self.version
     }
 }
 
