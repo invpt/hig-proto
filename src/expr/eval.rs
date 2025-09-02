@@ -1,20 +1,20 @@
 use std::mem;
 
-use crate::{actor::Address, expr::Value, node::VersionedReactiveAddress};
+use crate::{actor::Address, expr::Value, service::ReactiveAddress};
 
 use super::{Action, Expr, Ident, Upgrade};
 
 pub trait UpgradeEvalContext: ExprEvalContext<Ident> {
     fn var(&mut self, ident: Ident, value: Value);
     fn def(&mut self, ident: Ident, expr: Expr<Ident>);
-    fn del(&mut self, address: VersionedReactiveAddress);
+    fn del(&mut self, address: ReactiveAddress);
 }
 
-pub trait ActionEvalContext: ExprEvalContext<VersionedReactiveAddress> {
+pub trait ActionEvalContext: ExprEvalContext<ReactiveAddress> {
     /// Attempts to write to the node referenced by `address` with the given `value`.
     ///
     /// Returns true if the write was performed.
-    fn write(&mut self, address: &VersionedReactiveAddress, value: &Value) -> bool;
+    fn write(&mut self, address: &ReactiveAddress, value: &Value) -> bool;
 }
 
 pub trait ExprEvalContext<Ident = Address> {
@@ -67,7 +67,7 @@ impl Upgrade {
         }
     }
 
-    pub fn visit_upgrades(&self, mut visitor: impl FnMut(&VersionedReactiveAddress)) {
+    pub fn visit_upgrades(&self, mut visitor: impl FnMut(&ReactiveAddress)) {
         match self {
             Upgrade::Seq(a, b) => {
                 a.visit_upgrades(&mut visitor);
@@ -129,7 +129,7 @@ impl Action {
     }
 
     /// Traverses the expression, calling the callback with each VersionedAddress the Action might write to.
-    pub fn visit_writes(&self, mut visitor: impl FnMut(&VersionedReactiveAddress, bool)) {
+    pub fn visit_writes(&self, mut visitor: impl FnMut(&ReactiveAddress, bool)) {
         match self {
             Action::Seq(a, b) => {
                 a.visit_writes(&mut visitor);
@@ -143,7 +143,7 @@ impl Action {
     }
 
     /// Traverses the action, calling the callback with each VersionedAddress the Action might read from.
-    pub fn visit_reads(&self, mut visitor: impl FnMut(&VersionedReactiveAddress, bool)) {
+    pub fn visit_reads(&self, mut visitor: impl FnMut(&ReactiveAddress, bool)) {
         match self {
             Action::Seq(a, b) => {
                 a.visit_reads(&mut visitor);

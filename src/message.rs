@@ -7,7 +7,7 @@ use std::{
 use crate::{
     actor::{Address, Version},
     expr::{Action, Expr, Name, Type, Upgrade, Value},
-    node::{Import, ReactiveAddress, ReactiveId},
+    service::{Import, ReactiveAddress, ReactiveId},
 };
 
 #[derive(Clone)]
@@ -31,6 +31,7 @@ pub enum Message {
     LockGranted {
         txid: TxId,
         address: Address,
+        reactives: HashMap<ReactiveId, Version>,
     },
 
     // transaction - messages available to shared and exclusive locks
@@ -55,6 +56,8 @@ pub enum Message {
         txid: TxId,
     },
     ReadConfigurationResult {
+        txid: TxId,
+        service: Address,
         imports: HashMap<ReactiveAddress, Import>,
     },
     Configure {
@@ -89,9 +92,8 @@ pub enum Message {
     // messages sent/received by managers
     Do {
         action: Action,
-    },
-    Upgrade {
         upgrade: Upgrade,
+        expected_versions: HashMap<ReactiveAddress, Version>,
     },
     Directory {
         state: DirectoryState,
