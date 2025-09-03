@@ -1,39 +1,34 @@
 use std::mem;
 
 use crate::{
-    expr::{TransactionKind, UpgradeItem, Value},
-    node::VersionedReactiveAddress,
+    expr::{UpgradeItem, Value},
+    service::ReactiveAddress,
 };
 
 use super::{Action, Expr, Ident, Upgrade};
 
-pub trait UpgradeEvalContext: ExprEvalContext<Ident> {
+pub trait UpgradeEvalContext: ExprEvalContext<Ident> + ExprResolveContext<Ident> {
     fn var(&mut self, ident: Ident, value: Value);
-    fn def(&mut self, ident: Ident, expr: Expr<Ident>);
-    fn del(&mut self, address: VersionedReactiveAddress);
+    fn def(&mut self, ident: Ident, expr: Expr);
+    fn del(&mut self, address: ReactiveAddress);
 }
 
-pub trait ActionEvalContext: ExprEvalContext<VersionedReactiveAddress> {
+pub trait ActionEvalContext: ExprEvalContext {
     /// Attempts to write to the node referenced by `address` with the given `value`.
     ///
     /// Returns true if the write was performed.
-    fn write(&mut self, address: &VersionedReactiveAddress, value: &Value) -> bool;
+    fn write(&mut self, address: &ReactiveAddress, value: &Value) -> bool;
 }
 
-pub trait ExprEvalContext<Ident = VersionedReactiveAddress> {
+pub trait ExprEvalContext<Ident = ReactiveAddress> {
     /// Reads the value held by the node referenced by `ident`.
     ///
     /// If the value is not yet ready, this function will return `None` instead of a value.
-    fn read(&mut self, ident: &Ident) -> Option<&Value>;
+    fn read(&mut self, address: &Ident) -> Option<&Value>;
 }
 
-impl TransactionKind {
-    pub fn eval(&mut self, ctx: &mut (impl ActionEvalContext + UpgradeEvalContext)) {
-        match self {
-            TransactionKind::Action(action) => action.eval(ctx),
-            TransactionKind::Upgrade(upgrade) => upgrade.eval(ctx),
-        }
-    }
+pub trait ExprResolveContext<Ident> {
+    fn resolve(&mut self, ident: Ident) -> Option<ReactiveAddress>;
 }
 
 impl Upgrade {
@@ -59,7 +54,8 @@ impl Upgrade {
                         unreachable!()
                     };
 
-                    ctx.def(ident, expr);
+                    let resolved = expr.resolve(ctx);
+                    ctx.def(ident, resolved);
                 }
                 UpgradeItem::Del(_) => {
                     let UpgradeItem::Del(address) = self.items.remove(0) else {
@@ -119,7 +115,7 @@ impl Action {
     }
 
     /// Traverses the expression, calling the callback with each VersionedAddress the Action might write to.
-    pub fn visit_writes(&self, visitor: &mut impl FnMut(&VersionedReactiveAddress, bool)) {
+    pub fn visit_writes(&self, visitor: &mut impl FnMut(&ReactiveAddress, bool)) {
         match self {
             Action::Seq(a, b) => {
                 a.visit_writes(visitor);
@@ -133,7 +129,7 @@ impl Action {
     }
 
     /// Traverses the action, calling the callback with each VersionedAddress the Action might read from.
-    pub fn visit_reads(&self, visitor: &mut impl FnMut(&VersionedReactiveAddress, bool)) {
+    pub fn visit_reads(&self, visitor: &mut impl FnMut(&ReactiveAddress, bool)) {
         match self {
             Action::Seq(a, b) => {
                 a.visit_reads(visitor);
@@ -148,17 +144,17 @@ impl Action {
 }
 
 impl<Ident> Expr<Ident> {
-    pub fn resolve<OtherIdent>(
-        self,
-        resolve: &mut impl FnMut(Ident) -> OtherIdent,
-    ) -> Expr<OtherIdent> {
+    pub fn resolve<C>(self, ctx: &mut C) -> Expr
+    where
+        C: ExprResolveContext<Ident>,
+    {
         match self {
-            Expr::Read(ident) => Expr::Read(resolve(ident)),
+            Expr::Read(ident) => Expr::Read(ctx.resolve(ident).expect("failed to resolve")),
             Expr::Tuple(items) => Expr::Tuple(
                 items
                     .into_vec()
                     .into_iter()
-                    .map(|e| e.resolve(resolve))
+                    .map(|e| e.resolve(ctx))
                     .collect(),
             ),
             Expr::Value(value) => Expr::Value(value),

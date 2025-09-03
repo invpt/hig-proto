@@ -3,33 +3,36 @@ use std::collections::{hash_map::Entry, HashMap, HashSet};
 use crate::{
     actor::{Address, Context, Version},
     expr::{
-        eval::{ActionEvalContext, ExprEvalContext, UpgradeEvalContext},
-        Expr, Ident, TransactionKind, Value,
+        eval::{ActionEvalContext, ExprEvalContext, ExprResolveContext, UpgradeEvalContext},
+        Action, Expr, Ident, Name, Upgrade, Value,
     },
     message::{BasisStamp, LockKind, Message, TxId},
-    node::{Export, Import, ReactiveAddress, ReactiveId, VersionedReactiveAddress},
+    service::{Export, Import, ReactiveAddress, ReactiveId},
 };
 
 pub struct Transaction {
-    kind: TransactionKind,
+    action: Action,
+    upgrade: Upgrade,
     state: TransactionState,
 }
 
 struct TransactionState {
     id: TxId,
+    expected_versions: HashMap<ReactiveAddress, Version>,
     pending_locks: HashMap<Address, PendingLock>,
     locks: HashMap<Address, Lock>,
+    names: HashMap<(Address, Name), ReactiveAddress>,
     reactives: HashMap<ReactiveAddress, Option<Reactive>>,
+    prepared: HashMap<Address, BasisStamp>,
 }
 
 enum Reactive {
     Variable(Value),
-    Definition(Expr<ReactiveAddress>),
+    Definition(Expr),
 }
 
 struct PendingLock {
     kind: LockKind,
-    expected_reactives: HashMap<ReactiveId, Version>,
     configuration_needed: bool,
 }
 
@@ -45,6 +48,7 @@ enum Configuration {
     Some {
         imports: HashMap<ReactiveAddress, Import>,
         exports: HashMap<ReactiveId, Export>,
+        next_id: ReactiveId,
         subscriptions: HashMap<ReactiveId, HashSet<ReactiveId>>,
         roots: HashMap<ReactiveId, HashSet<ReactiveAddress>>,
     },
@@ -56,42 +60,72 @@ enum ReactiveValue {
 }
 
 impl Transaction {
-    pub fn new(id: TxId, kind: TransactionKind) -> Transaction {
-        Transaction {
-            kind: kind,
-            state: TransactionState::new(id),
-        }
-    }
+    pub fn new(
+        id: TxId,
+        action: Action,
+        upgrade: Upgrade,
+        expected_versions: HashMap<ReactiveAddress, Version>,
+        ctx: &Context,
+    ) -> Transaction {
+        let mut state = TransactionState::new(id, expected_versions);
 
-    pub fn init(&mut self, ctx: &Context) {
-        self.state.init(&self.kind, ctx);
+        for item in &upgrade.items {
+            state.lock(item.address().clone(), LockKind::Exclusive, true, ctx);
+        }
+
+        action.visit_writes(&mut |address, _| {
+            state.lock(address.service.clone(), LockKind::Exclusive, false, ctx);
+        });
+
+        action.visit_reads(&mut |address, _| {
+            state.lock(address.service.clone(), LockKind::Shared, false, ctx);
+        });
+
+        upgrade.visit_reads(&mut |ident, _| {
+            let Ident::Existing(address) = ident else {
+                return;
+            };
+
+            state.lock(address.service.clone(), LockKind::Shared, false, ctx);
+        });
+
+        Transaction {
+            action,
+            upgrade,
+            state,
+        }
     }
 
     pub fn lock_granted(
         &mut self,
-        address: Address,
+        service: Address,
         reactives: HashMap<ReactiveId, Version>,
         ctx: &Context,
     ) {
         let pending = self
             .state
             .pending_locks
-            .remove(&address)
+            .remove(&service)
             .expect("unknown lock granted");
 
-        for (id, version) in pending.expected_reactives {
-            let actual_version = reactives.get(&id).expect("missing expected reactive");
-            assert_eq!(version, *actual_version);
+        for (address, version) in &self.state.expected_versions {
+            if address.service == service {
+                assert_eq!(
+                    reactives.get(&address.id),
+                    Some(version),
+                    "version mismatch"
+                );
+            }
         }
 
         self.state.locks.insert(
-            address.clone(),
+            service.clone(),
             Lock {
                 kind: pending.kind,
                 values: HashMap::new(),
                 configuration: if pending.configuration_needed {
                     ctx.send(
-                        &address,
+                        &service,
                         Message::ReadConfiguration {
                             txid: self.state.id.clone(),
                         },
@@ -104,17 +138,15 @@ impl Transaction {
             },
         );
 
-        self.kind.eval(&mut EvalContext {
-            state: &mut self.state,
-            ctx,
-        });
+        self.eval(ctx);
     }
 
     pub fn returned_configuration(
         &mut self,
-        address: Address,
+        service: Address,
         imports: HashMap<ReactiveAddress, Import>,
         exports: HashMap<ReactiveId, Export>,
+        next_id: ReactiveId,
         subscriptions: HashMap<ReactiveId, HashSet<ReactiveId>>,
         roots: HashMap<ReactiveId, HashSet<ReactiveAddress>>,
         ctx: &Context,
@@ -122,95 +154,73 @@ impl Transaction {
         let lock = self
             .state
             .locks
-            .get_mut(&address)
+            .get_mut(&service)
             .expect("configuration for unlocked node");
 
         lock.configuration = Configuration::Some {
             imports,
             exports,
+            next_id,
             subscriptions,
             roots,
         };
 
-        self.kind.eval(&mut EvalContext {
+        self.eval(ctx);
+    }
+
+    pub fn returned_value(&mut self, reactive: ReactiveAddress, value: Value, ctx: &Context) {
+        let lock = self
+            .state
+            .locks
+            .get_mut(&reactive.service)
+            .expect("value for unlocked node");
+
+        let slot @ ReactiveValue::PendingRead = lock
+            .values
+            .get_mut(&reactive.id)
+            .expect("unrequested value")
+        else {
+            panic!("reactive value in incorrect state")
+        };
+
+        *slot = ReactiveValue::Some(value);
+
+        self.eval(ctx);
+    }
+
+    fn eval(&mut self, ctx: &Context) {
+        self.action.eval(&mut EvalContext {
             state: &mut self.state,
             ctx,
         });
+        self.upgrade.eval(&mut EvalContext {
+            state: &mut self.state,
+            ctx,
+        });
+
+        if matches!(self.action, Action::Nil) && self.upgrade.items.len() == 0 {
+            for (service, lock) in &self.state.locks {
+                ctx.send(
+                    service,
+                    Message::PrepareCommit {
+                        txid: self.state.id.clone(),
+                    },
+                );
+            }
+        }
     }
 }
 
 impl TransactionState {
-    fn new(id: TxId) -> TransactionState {
+    fn new(id: TxId, expected_versions: HashMap<ReactiveAddress, Version>) -> TransactionState {
         TransactionState {
             id,
+            expected_versions,
             pending_locks: HashMap::new(),
             locks: HashMap::new(),
+            names: HashMap::new(),
             reactives: HashMap::new(),
-        }
-    }
-
-    fn init(&mut self, kind: &TransactionKind, ctx: &Context) {
-        let mut required_locks: HashMap<Address, (LockKind, HashMap<ReactiveId, Version>, bool)> =
-            HashMap::new();
-
-        match kind {
-            TransactionKind::Action(action) => {
-                action.visit_writes(&mut |address: &VersionedReactiveAddress, _| {
-                    let (_, expected_reactives, _) = required_locks
-                        .entry(address.address.clone())
-                        .or_insert_with(|| (LockKind::Exclusive, HashMap::new(), false));
-
-                    let expected_version = expected_reactives
-                        .entry(address.id)
-                        .or_insert(address.version);
-
-                    assert_eq!(*expected_version, address.version);
-                });
-
-                action.visit_reads(&mut |address, _| {
-                    let (_, expected_reactives, _) = required_locks
-                        .entry(address.address.clone())
-                        .or_insert_with(|| (LockKind::Shared, HashMap::new(), false));
-
-                    let expected_version = expected_reactives
-                        .entry(address.id)
-                        .or_insert(address.version);
-
-                    assert_eq!(*expected_version, address.version);
-                });
-            }
-            TransactionKind::Upgrade(upgrade) => {
-                for item in &upgrade.items {
-                    let (_, expected_reactives, _) = required_locks
-                        .entry(item.address().clone())
-                        .or_insert_with(|| (LockKind::Exclusive, HashMap::new(), true));
-
-                    if let Some((id, version)) = item.expected_reactive() {
-                        let expected_version = expected_reactives.entry(id).or_insert(version);
-                        assert_eq!(*expected_version, version);
-                    }
-                }
-
-                upgrade.visit_reads(&mut |ident, _| {
-                    let Ident::Existing(address) = ident else {
-                        return;
-                    };
-
-                    let (_, expected_reactives, _) = required_locks
-                        .entry(address.address.clone())
-                        .or_insert_with(|| (LockKind::Shared, HashMap::new(), false));
-
-                    let expected_version = expected_reactives
-                        .entry(address.id)
-                        .or_insert(address.version);
-
-                    assert_eq!(*expected_version, address.version);
-                });
-            }
-        }
-
-        for (address, (kind, expected_reactives, configuration_needed)) in required_locks {
-            self.lock(address, kind, expected_reactives, configuration_needed, ctx);
+            prepared: HashMap::new(),
         }
     }
 
@@ -218,7 +228,6 @@ impl TransactionState {
         &mut self,
         address: Address,
         kind: LockKind,
-        expected_reactives: HashMap<ReactiveId, Version>,
         configuration_needed: bool,
         ctx: &Context,
     ) {
@@ -228,6 +237,8 @@ impl TransactionState {
                 (LockKind::Exclusive, LockKind::Shared)
             ) {
                 panic!("can't upgrade lock kind");
+            } else {
+                return;
             }
         }
 
@@ -242,23 +253,11 @@ impl TransactionState {
                     panic!("can't upgrade lock kind");
                 }
 
-                for (id, v) in expected_reactives {
-                    match current.expected_reactives.entry(id) {
-                        Entry::Occupied(current) => {
-                            assert_eq!(*current.get(), v);
-                        }
-                        Entry::Vacant(current) => {
-                            current.insert(v);
-                        }
-                    }
-                }
-
                 current.configuration_needed = configuration_needed || current.configuration_needed;
             }
             Entry::Vacant(e) => {
                 e.insert(PendingLock {
                     kind,
-                    expected_reactives,
                     configuration_needed,
                 });
 
@@ -272,6 +271,36 @@ impl TransactionState {
             }
         };
     }
+
+    fn declare(&mut self, ident: Ident, reactive: Reactive) {
+        let address = match ident {
+            Ident::New(service, name) => self
+                .names
+                .entry((service, name))
+                .or_insert_with_key(|(service, _)| {
+                    let Configuration::Some { next_id, .. } = &mut self
+                        .locks
+                        .get_mut(service)
+                        .expect("couldn't find service")
+                        .configuration
+                    else {
+                        panic!("missing service configuration")
+                    };
+
+                    let id = *next_id;
+                    *next_id = next_id.increment();
+
+                    ReactiveAddress {
+                        service: service.clone(),
+                        id,
+                    }
+                })
+                .clone(),
+            Ident::Existing(address) => address,
+        };
+
+        self.reactives.insert(address, Some(reactive));
+    }
 }
 
 struct EvalContext<'a, 'c> {
@@ -281,68 +310,21 @@ struct EvalContext<'a, 'c> {
 
 impl<'a, 'c> UpgradeEvalContext for EvalContext<'a, 'c> {
     fn var(&mut self, ident: Ident, value: Value) {
-        let reactive_address = match ident {
-            Ident::New(address, name) => {
-                // TODO: save name to resolve later
-                _ = name;
-                ReactiveAddress {
-                    address,
-                    id: ReactiveId(0), // TODO: random id or something
-                }
-            }
-            Ident::Existing(address) => ReactiveAddress {
-                address: address.address,
-                id: address.id,
-            },
-        };
-
-        self.state
-            .reactives
-            .insert(reactive_address, Some(Reactive::Variable(value)));
+        self.state.declare(ident, Reactive::Variable(value));
     }
 
-    fn def(&mut self, ident: Ident, expr: Expr<Ident>) {
-        let reactive_address = match ident {
-            Ident::New(address, name) => {
-                // TODO: save name to resolve later
-                ReactiveAddress {
-                    address,
-                    id: ReactiveId(0), // TODO: random id
-                }
-            }
-            Ident::Existing(address) => ReactiveAddress {
-                address: address.address,
-                id: address.id,
-            },
-        };
-
-        let expr = expr.resolve(&mut |ident| match ident {
-            Ident::New(address, name) => todo!("resolve {address:?} {name:?}"),
-            Ident::Existing(address) => ReactiveAddress {
-                address: address.address,
-                id: address.id,
-            },
-        });
-
-        self.state
-            .reactives
-            .insert(reactive_address, Some(Reactive::Definition(expr)));
+    fn def(&mut self, ident: Ident, expr: Expr) {
+        self.state.declare(ident, Reactive::Definition(expr));
     }
 
-    fn del(&mut self, address: VersionedReactiveAddress) {
-        self.state.reactives.insert(
-            ReactiveAddress {
-                address: address.address,
-                id: address.id,
-            },
-            None,
-        );
+    fn del(&mut self, address: ReactiveAddress) {
+        self.state.reactives.insert(address, None);
     }
 }
 
 impl<'a, 'c> ActionEvalContext for EvalContext<'a, 'c> {
-    fn write(&mut self, address: &VersionedReactiveAddress, value: &crate::expr::Value) -> bool {
-        if let Some(lock) = self.state.locks.get_mut(&address.address) {
+    fn write(&mut self, address: &ReactiveAddress, value: &crate::expr::Value) -> bool {
+        if let Some(lock) = self.state.locks.get_mut(&address.service) {
             assert_eq!(lock.kind, LockKind::Exclusive);
 
             let Entry::Vacant(v) = lock.values.entry(address.id) else {
@@ -353,7 +335,7 @@ impl<'a, 'c> ActionEvalContext for EvalContext<'a, 'c> {
             v.insert(ReactiveValue::Some(value.clone()));
 
             self.ctx.send(
-                &address.address,
+                &address.service,
                 Message::Write {
                     txid: self.state.id.clone(),
                     reactive: address.id,
@@ -371,15 +353,31 @@ impl<'a, 'c> ActionEvalContext for EvalContext<'a, 'c> {
 impl<'a, 'c> ExprEvalContext<Ident> for EvalContext<'a, 'c> {
     fn read(&mut self, ident: &Ident) -> Option<&Value> {
         match ident {
-            Ident::New(address, name) => todo!("read new {address:?}.{name:?}"),
+            Ident::New(service, name) => {
+                // todo: dont clone
+                let address = self
+                    .state
+                    .names
+                    .get(&(service.clone(), name.clone()))
+                    .expect("couldn't resolve");
+                let Some(Reactive::Variable(value)) = self
+                    .state
+                    .reactives
+                    .get(&address)
+                    .expect("couldn't find reactive")
+                else {
+                    panic!("can't read from newly-created definition")
+                };
+                Some(value)
+            }
             Ident::Existing(address) => self.read(address),
         }
     }
 }
 
 impl<'a, 'c> ExprEvalContext for EvalContext<'a, 'c> {
-    fn read(&mut self, address: &VersionedReactiveAddress) -> Option<&crate::expr::Value> {
-        if let Some(lock) = self.state.locks.get_mut(&address.address) {
+    fn read(&mut self, address: &ReactiveAddress) -> Option<&crate::expr::Value> {
+        if let Some(lock) = self.state.locks.get_mut(&address.service) {
             match lock.values.entry(address.id) {
                 Entry::Occupied(read) => match read.into_mut() {
                     ReactiveValue::PendingRead => None,
@@ -389,7 +387,7 @@ impl<'a, 'c> ExprEvalContext for EvalContext<'a, 'c> {
                     read.insert(ReactiveValue::PendingRead);
 
                     self.ctx.send(
-                        &address.address,
+                        &address.service,
                         Message::ReadValue {
                             txid: self.state.id.clone(),
                             reactive: address.id,
@@ -403,6 +401,15 @@ impl<'a, 'c> ExprEvalContext for EvalContext<'a, 'c> {
             }
         } else {
             None
+        }
+    }
+}
+
+impl<'a, 'c> ExprResolveContext<Ident> for EvalContext<'a, 'c> {
+    fn resolve(&mut self, ident: Ident) -> Option<ReactiveAddress> {
+        match ident {
+            Ident::Existing(address) => Some(address),
+            Ident::New(service, name) => self.state.names.get(&(service, name)).cloned(),
         }
     }
 }

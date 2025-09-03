@@ -6,8 +6,8 @@ use std::{
 
 use crate::{
     actor::{Address, Version},
-    expr::{Action, Expr, Name, TransactionKind, Type, Upgrade, Value},
-    node::{Export, Import, ReactiveAddress, ReactiveId},
+    expr::{Action, Expr, Name, Type, Upgrade, Value},
+    service::{Export, Import, ReactiveAddress, ReactiveId},
 };
 
 #[derive(Debug, Clone)]
@@ -30,7 +30,7 @@ pub enum Message {
     },
     LockGranted {
         txid: TxId,
-        address: Address,
+        service: Address,
         reactives: HashMap<ReactiveId, Version>,
     },
 
@@ -43,7 +43,7 @@ pub enum Message {
     ReturnedValue {
         txid: TxId,
         reactive: ReactiveAddress,
-        value: StampedValue,
+        value: Value,
     },
 
     // transaction - messages available to exclusive locks
@@ -57,9 +57,10 @@ pub enum Message {
     },
     ReturnedConfiguration {
         txid: TxId,
-        address: Address,
+        service: Address,
         imports: HashMap<ReactiveAddress, Import>,
         exports: HashMap<ReactiveId, Export>,
+        next_id: ReactiveId,
         subscriptions: HashMap<ReactiveId, HashSet<ReactiveId>>,
         roots: HashMap<ReactiveId, HashSet<ReactiveAddress>>,
     },
@@ -95,7 +96,9 @@ pub enum Message {
 
     // messages sent/received by managers
     Do {
-        transaction: TransactionKind,
+        action: Action,
+        upgrade: Upgrade,
+        expected_versions: HashMap<ReactiveAddress, Version>,
     },
     Directory {
         state: DirectoryState,
@@ -166,7 +169,7 @@ impl BasisStamp {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Iteration(usize);
+pub struct Iteration(u64);
 
 impl Iteration {
     pub const ZERO: Iteration = Iteration(0);

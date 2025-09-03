@@ -11,7 +11,7 @@ use crate::{
 mod held_locks;
 mod reactive;
 
-pub struct Node {
+pub struct Service {
     queued: BTreeMap<TxId, LockKind>,
     held: HeldLocks,
     preempted: HashSet<TxId>,
@@ -20,6 +20,7 @@ pub struct Node {
     reactives: HashMap<ReactiveId, Reactive>,
     iterations: HashMap<ReactiveId, Iteration>,
     exports: HashMap<ReactiveId, Export>,
+    next_id: ReactiveId,
 
     subscriptions: HashMap<ReactiveId, HashSet<ReactiveId>>,
     roots: HashMap<ReactiveId, HashSet<ReactiveAddress>>,
@@ -27,20 +28,19 @@ pub struct Node {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct VersionedReactiveAddress {
-    pub address: Address,
-    pub id: ReactiveId,
-    pub version: Version,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ReactiveAddress {
-    pub address: Address,
+    pub service: Address,
     pub id: ReactiveId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ReactiveId(pub usize);
+pub struct ReactiveId(pub u64);
+
+impl ReactiveId {
+    pub fn increment(self) -> ReactiveId {
+        ReactiveId(self.0 + 1)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Import {
@@ -59,9 +59,9 @@ pub struct Export {
 #[derive(Debug)]
 struct Cyclical;
 
-impl Node {
-    pub fn new() -> Node {
-        Node {
+impl Service {
+    pub fn new() -> Service {
+        Service {
             queued: BTreeMap::new(),
             held: HeldLocks::None,
             preempted: HashSet::new(),
@@ -69,6 +69,7 @@ impl Node {
             reactives: HashMap::new(),
             iterations: HashMap::new(),
             exports: HashMap::new(),
+            next_id: ReactiveId(0),
             subscriptions: HashMap::new(),
             roots: HashMap::new(),
             topo: VecDeque::new(),
@@ -138,7 +139,7 @@ impl Node {
                 &txid.address,
                 Message::LockGranted {
                     txid: txid.clone(),
-                    address: ctx.me().clone(),
+                    service: ctx.me().clone(),
                     reactives: self
                         .reactives
                         .iter()
@@ -174,7 +175,7 @@ impl Node {
             // propagating basis stamps to other network nodes in propagate().
             basis.roots.insert(
                 ReactiveAddress {
-                    address: ctx.me().clone(),
+                    service: ctx.me().clone(),
                     id,
                 },
                 exclusive_state.prepared_iterations[&id],
@@ -234,7 +235,7 @@ impl Node {
                         continue;
                     }
 
-                    if &input.address == ctx.me() {
+                    if &input.service == ctx.me() {
                         self.subscriptions
                             .entry(input.id)
                             .or_insert_with(HashSet::new)
@@ -249,7 +250,7 @@ impl Node {
                 }
 
                 for removed in prior_inputs {
-                    if &removed.address == ctx.me() {
+                    if &removed.service == ctx.me() {
                         self.subscriptions.get_mut(&removed.id).unwrap().remove(&id);
                     } else {
                         let import = self.imports.get_mut(&removed).unwrap();
@@ -265,7 +266,7 @@ impl Node {
                 self.iterations.remove(&id);
 
                 for input in removed.inputs() {
-                    if &input.address == ctx.me() {
+                    if &input.service == ctx.me() {
                         self.subscriptions.get_mut(&input.id).map(|i| i.remove(&id));
                     } else {
                         self.imports.get_mut(input).map(|i| i.importers.remove(&id));
@@ -288,7 +289,7 @@ impl Node {
                     Export {
                         roots: self.roots[&id]
                             .iter()
-                            .filter(|r| &r.address != ctx.me())
+                            .filter(|r| &r.service != ctx.me())
                             .cloned()
                             .collect(),
                         importers: addrs,
@@ -346,7 +347,7 @@ impl Node {
             for input in self.reactives[id].inputs() {
                 has_inputs = true;
 
-                if &input.address == ctx.me() {
+                if &input.service == ctx.me() {
                     roots.extend(self.roots[&input.id].iter().cloned());
                 } else {
                     roots.extend(self.imports[input].roots.iter().cloned());
@@ -355,7 +356,7 @@ impl Node {
 
             if !has_inputs {
                 roots.insert(ReactiveAddress {
-                    address: ctx.me().clone(),
+                    service: ctx.me().clone(),
                     id: *id,
                 });
             }
@@ -366,7 +367,7 @@ impl Node {
         for (id, export) in &mut self.exports {
             export.roots = self.roots[id]
                 .iter()
-                .filter(|r| &r.address != ctx.me())
+                .filter(|r| &r.service != ctx.me())
                 .cloned()
                 .collect();
         }
@@ -390,7 +391,7 @@ impl Node {
             }
 
             let roots = |address: &ReactiveAddress| {
-                if &address.address == ctx.me() {
+                if &address.service == ctx.me() {
                     self.roots.get(&address.id)
                 } else {
                     self.imports.get(address).map(|i| &i.roots)
@@ -408,7 +409,7 @@ impl Node {
                 for sub in self.subscriptions.get(id).unwrap() {
                     self.reactives.get_mut(sub).unwrap().add_update(
                         ReactiveAddress {
-                            address: ctx.me().clone(),
+                            service: ctx.me().clone(),
                             id: *id,
                         },
                         value.clone(),
@@ -423,7 +424,7 @@ impl Node {
                             .roots
                             .into_iter()
                             .filter(|(a, _)| {
-                                &a.address != ctx.me() || self.exports.contains_key(&a.id)
+                                &a.service != ctx.me() || self.exports.contains_key(&a.id)
                             })
                             .collect(),
                     },
@@ -440,7 +441,7 @@ impl Node {
                         addr,
                         Message::Propagate {
                             sender: ReactiveAddress {
-                                address: ctx.me().clone(),
+                                service: ctx.me().clone(),
                                 id: *id,
                             },
                             value: value_without_local_only_bases.clone(),
@@ -471,10 +472,10 @@ impl Node {
                                 Message::ReturnedValue {
                                     txid: txid.clone(),
                                     reactive: ReactiveAddress {
-                                        address: ctx.me().clone(),
+                                        service: ctx.me().clone(),
                                         id: *id,
                                     },
-                                    value: value.clone(),
+                                    value: value.value.clone(),
                                 },
                             );
 
@@ -487,7 +488,7 @@ impl Node {
     }
 }
 
-impl Actor for Node {
+impl Actor for Service {
     fn handle(&mut self, message: Message, mut ctx: Context) {
         match message {
             Message::Lock { txid, kind } => {
@@ -547,7 +548,7 @@ impl Actor for Node {
                                 .prepared_iterations
                                 .insert(*id, self.iterations[id].increment());
                         } else if self.reactives[id].inputs().any(|input| {
-                            &input.address == ctx.me()
+                            &input.service == ctx.me()
                                 && exclusive.prepared_iterations.contains_key(&input.id)
                         }) {
                             exclusive
@@ -574,7 +575,7 @@ impl Actor for Node {
                             .map(|(id, iter)| {
                                 (
                                     ReactiveAddress {
-                                        address: ctx.me().clone(),
+                                        service: ctx.me().clone(),
                                         id: *id,
                                     },
                                     *iter,
@@ -674,10 +675,10 @@ impl Actor for Node {
                             Message::ReturnedValue {
                                 txid: txid.clone(),
                                 reactive: ReactiveAddress {
-                                    address: ctx.me().clone(),
+                                    service: ctx.me().clone(),
                                     id: reactive,
                                 },
-                                value: value.clone(),
+                                value: value.value.clone(),
                             },
                         );
 
@@ -710,11 +711,12 @@ impl Actor for Node {
                     &txid.address,
                     Message::ReturnedConfiguration {
                         txid: txid.clone(),
-                        address: ctx.me().clone(),
+                        service: ctx.me().clone(),
                         imports: self.imports.clone(),
+                        exports: self.exports.clone(),
+                        next_id: self.next_id,
                         subscriptions: self.subscriptions.clone(),
                         roots: self.roots.clone(),
-                        exports: self.exports.clone(),
                     },
                 );
             }

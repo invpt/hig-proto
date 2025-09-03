@@ -7,14 +7,14 @@ use crate::{
         BasisStamp, ImportConfiguration, LockKind, Message, MonotonicTimestampGenerator,
         ReactiveConfiguration, StampedValue, Timestamp, TxId, TxPriority,
     },
-    node::{Node, ReactiveAddress, ReactiveId},
+    service::{ReactiveAddress, ReactiveId, Service},
 };
 
 mod actor;
 mod expr;
 mod manager;
 mod message;
-mod node;
+mod service;
 
 fn main() {
     let mut system = System::new();
@@ -47,8 +47,8 @@ impl ActorConfiguration for ScenarioConfiguration {
 
     fn spawn(self, ctx: Context) -> Scenario {
         let mut gen = MonotonicTimestampGenerator::new();
-        let node1 = ctx.spawn(Node::new());
-        let node2 = ctx.spawn(Node::new());
+        let node1 = ctx.spawn(Service::new());
+        let node2 = ctx.spawn(Service::new());
 
         let timestamp = gen.generate_timestamp();
         let txid = TxId {
@@ -90,7 +90,7 @@ impl Actor for Scenario {
         match message {
             Message::LockGranted {
                 txid,
-                address,
+                service: address,
                 reactives: _,
             } => {
                 assert_eq!(&txid, &self.txid);
@@ -115,7 +115,7 @@ impl Actor for Scenario {
                                     ReactiveId(1),
                                     Some(ReactiveConfiguration::Definition {
                                         expr: Expr::Read(ReactiveAddress {
-                                            address: self.node1.clone(),
+                                            service: self.node1.clone(),
                                             id: ReactiveId(0),
                                         }),
                                     }),
@@ -134,12 +134,12 @@ impl Actor for Scenario {
                             txid: self.txid.clone(),
                             imports: HashMap::from([(
                                 ReactiveAddress {
-                                    address: self.node1.clone(),
+                                    service: self.node1.clone(),
                                     id: ReactiveId(1),
                                 },
                                 Some(ImportConfiguration {
                                     roots: HashSet::from([ReactiveAddress {
-                                        address: self.node1.clone(),
+                                        service: self.node1.clone(),
                                         id: ReactiveId(1),
                                     }]),
                                 }),
@@ -148,7 +148,7 @@ impl Actor for Scenario {
                                 ReactiveId(0),
                                 Some(ReactiveConfiguration::Definition {
                                     expr: Expr::Read(ReactiveAddress {
-                                        address: self.node1.clone(),
+                                        service: self.node1.clone(),
                                         id: ReactiveId(1),
                                     }),
                                 }),
@@ -228,7 +228,7 @@ impl Actor for Stage2 {
         match message {
             Message::LockGranted {
                 txid,
-                address,
+                service: address,
                 reactives: _,
             } => {
                 assert_eq!(address, self.node1);

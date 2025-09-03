@@ -51,7 +51,7 @@ pub struct Address {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Version(usize);
+pub struct Version(u64);
 
 impl Version {
     pub const ZERO: Version = Version(0);

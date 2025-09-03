@@ -4,7 +4,6 @@ use transaction::Transaction;
 
 use crate::{
     actor::{Actor, Context},
-    expr::TransactionKind,
     message::{Message, MonotonicTimestampGenerator, TxId, TxPriority},
 };
 
@@ -22,27 +21,29 @@ impl Manager {
 impl Actor for Manager {
     fn handle(&mut self, message: Message, ctx: Context) {
         match message {
-            Message::Do { transaction } => {
+            Message::Do {
+                action,
+                upgrade,
+                expected_versions,
+            } => {
                 let txid = TxId {
-                    priority: match transaction {
-                        TransactionKind::Action(_) => TxPriority::Low,
-                        TransactionKind::Upgrade(_) => TxPriority::High,
+                    priority: if upgrade.items.is_empty() {
+                        TxPriority::Low
+                    } else {
+                        TxPriority::High
                     },
                     timestamp: self.timestamp_generator.generate_timestamp(),
                     address: ctx.me().clone(),
                 };
 
-                let tx = self
-                    .transactions
-                    .entry(txid.clone())
-                    .insert_entry(Transaction::new(txid, transaction))
-                    .into_mut();
-
-                tx.init(&ctx);
+                self.transactions.insert(
+                    txid.clone(),
+                    Transaction::new(txid, action, upgrade, expected_versions, &ctx),
+                );
             }
             Message::LockGranted {
                 txid,
-                address,
+                service,
                 reactives,
             } => {
                 let tx = self
@@ -50,22 +51,43 @@ impl Actor for Manager {
                     .get_mut(&txid)
                     .expect("Lock granted for unknown transaction");
 
-                tx.lock_granted(address, reactives, &ctx);
+                tx.lock_granted(service, reactives, &ctx);
             }
             Message::ReturnedConfiguration {
                 txid,
-                address,
+                service,
                 imports,
                 exports,
+                next_id,
                 subscriptions,
                 roots,
             } => {
                 let tx = self
                     .transactions
                     .get_mut(&txid)
-                    .expect("Lock granted for unknown transaction");
+                    .expect("Returned configuration for unknown transaction");
 
-                tx.returned_configuration(address, imports, exports, subscriptions, roots, &ctx);
+                tx.returned_configuration(
+                    service,
+                    imports,
+                    exports,
+                    next_id,
+                    subscriptions,
+                    roots,
+                    &ctx,
+                );
+            }
+            Message::ReturnedValue {
+                txid,
+                reactive,
+                value,
+            } => {
+                let tx = self
+                    .transactions
+                    .get_mut(&txid)
+                    .expect("Returned value for unknown transaction");
+
+                tx.returned_value(reactive, value, &ctx);
             }
             _ => todo!(),
         }

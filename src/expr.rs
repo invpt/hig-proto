@@ -1,15 +1,9 @@
 use crate::{
     actor::{Address, Version},
-    node::{ReactiveId, VersionedReactiveAddress},
+    service::{ReactiveAddress, ReactiveId},
 };
 
 pub mod eval;
-
-#[derive(Debug, Clone)]
-pub enum TransactionKind {
-    Action(Action),
-    Upgrade(Upgrade),
-}
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Name {
@@ -25,35 +19,21 @@ pub struct Upgrade {
 pub enum UpgradeItem {
     Var(Ident, Expr<Ident>),
     Def(Ident, Expr<Ident>),
-    Del(VersionedReactiveAddress),
+    Del(ReactiveAddress),
 }
 
 impl UpgradeItem {
-    pub fn expected_reactive(&self) -> Option<(ReactiveId, Version)> {
-        match self {
-            UpgradeItem::Var(ident, _) => match ident {
-                Ident::New(..) => None,
-                Ident::Existing(address) => Some((address.id, address.version)),
-            },
-            UpgradeItem::Def(ident, _) => match ident {
-                Ident::New(..) => None,
-                Ident::Existing(address) => Some((address.id, address.version)),
-            },
-            UpgradeItem::Del(address) => Some((address.id, address.version)),
-        }
-    }
-
     pub fn address(&self) -> &Address {
         match self {
             UpgradeItem::Var(ident, _) => match ident {
                 Ident::New(address, _) => address,
-                Ident::Existing(address) => &address.address,
+                Ident::Existing(address) => &address.service,
             },
             UpgradeItem::Def(ident, _) => match ident {
                 Ident::New(address, _) => address,
-                Ident::Existing(address) => &address.address,
+                Ident::Existing(address) => &address.service,
             },
-            UpgradeItem::Del(address) => &address.address,
+            UpgradeItem::Del(address) => &address.service,
         }
     }
 }
@@ -61,26 +41,26 @@ impl UpgradeItem {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum Ident {
     New(Address, Name),
-    Existing(VersionedReactiveAddress),
+    Existing(ReactiveAddress),
 }
 
 impl Ident {
     pub fn address(&self) -> &Address {
         match self {
             Ident::New(address, _) => address,
-            Ident::Existing(address) => &address.address,
+            Ident::Existing(address) => &address.service,
         }
     }
 }
 
-impl From<VersionedReactiveAddress> for Ident {
-    fn from(value: VersionedReactiveAddress) -> Self {
+impl From<ReactiveAddress> for Ident {
+    fn from(value: ReactiveAddress) -> Self {
         Ident::Existing(value)
     }
 }
 
 #[derive(Debug, Clone)]
-pub enum Expr<Ident = VersionedReactiveAddress> {
+pub enum Expr<Ident = ReactiveAddress> {
     // TODO: more exprs
     Tuple(Box<[Expr<Ident>]>),
     Read(Ident),
@@ -90,7 +70,7 @@ pub enum Expr<Ident = VersionedReactiveAddress> {
 #[derive(Debug, Clone)]
 pub enum Action {
     Seq(Box<Action>, Box<Action>),
-    Write(VersionedReactiveAddress, Expr<VersionedReactiveAddress>),
+    Write(ReactiveAddress, Expr<ReactiveAddress>),
     Nil,
     // TODO: control flow
 }
