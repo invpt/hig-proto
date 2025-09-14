@@ -4,9 +4,11 @@ use transaction::Transaction;
 
 use crate::{
     actor::{Actor, Context},
+    expr::Upgrade,
     message::{Message, MonotonicTimestampGenerator, TxId, TxPriority},
 };
 
+mod graph;
 mod transaction;
 
 pub struct Manager {
@@ -27,7 +29,7 @@ impl Actor for Manager {
                 expected_versions,
             } => {
                 let txid = TxId {
-                    priority: if upgrade.items.is_empty() {
+                    priority: if let Upgrade::Nil = upgrade {
                         TxPriority::Low
                     } else {
                         TxPriority::High
@@ -57,25 +59,16 @@ impl Actor for Manager {
                 txid,
                 service,
                 imports,
+                inputs: reactives,
                 exports,
                 next_id,
-                subscriptions,
-                roots,
             } => {
                 let tx = self
                     .transactions
                     .get_mut(&txid)
                     .expect("Returned configuration for unknown transaction");
 
-                tx.returned_configuration(
-                    service,
-                    imports,
-                    exports,
-                    next_id,
-                    subscriptions,
-                    roots,
-                    &ctx,
-                );
+                tx.returned_configuration(service, imports, reactives, exports, next_id, &ctx);
             }
             Message::ReturnedValue {
                 txid,

@@ -1,16 +1,16 @@
 use std::mem;
 
 use crate::{
-    expr::{UpgradeItem, Value},
+    expr::{UpgradeStmt, Value},
     service::ReactiveAddress,
 };
 
-use super::{Action, Expr, Ident, Upgrade};
+use super::{Action, ActionStmt, Expr, Ident, Upgrade};
 
 pub trait UpgradeEvalContext: ExprEvalContext<Ident> + ExprResolveContext<Ident> {
-    fn var(&mut self, ident: Ident, value: Value);
-    fn def(&mut self, ident: Ident, expr: Expr);
-    fn del(&mut self, address: ReactiveAddress);
+    fn var(&mut self, ident: &Ident, value: &Value) -> bool;
+    fn def(&mut self, ident: &Ident, expr: &Expr) -> bool;
+    fn del(&mut self, address: &ReactiveAddress) -> bool;
 }
 
 pub trait ActionEvalContext: ExprEvalContext {
@@ -33,53 +33,63 @@ pub trait ExprResolveContext<Ident> {
 
 impl Upgrade {
     pub fn eval(&mut self, ctx: &mut impl UpgradeEvalContext) {
-        while !self.items.is_empty() {
-            match self.items.first_mut().unwrap() {
-                UpgradeItem::Var(_, expr) => {
-                    expr.eval(ctx);
+        match self {
+            Upgrade::Stmt(stmt, rest) => {
+                let done = match stmt {
+                    UpgradeStmt::Var(ident, expr) => {
+                        expr.eval(ctx);
 
-                    if let Expr::Value(_) = expr {
-                        let UpgradeItem::Var(ident, Expr::Value(value)) = self.items.remove(0)
-                        else {
-                            unreachable!()
-                        };
-
-                        ctx.var(ident, value);
-                    } else {
-                        panic!("var expr could not be fully evaluated")
+                        if let Expr::Value(value) = expr {
+                            ctx.var(ident, value)
+                        } else {
+                            panic!("var expr could not be fully evaluated")
+                        }
                     }
-                }
-                UpgradeItem::Def(..) => {
-                    let UpgradeItem::Def(ident, expr) = self.items.remove(0) else {
-                        unreachable!()
-                    };
+                    UpgradeStmt::Def(ident, expr) => {
+                        // TODO: something less expensive than cloning here :(
+                        let resolved = expr.clone().resolve(ctx);
 
-                    let resolved = expr.resolve(ctx);
-                    ctx.def(ident, resolved);
-                }
-                UpgradeItem::Del(_) => {
-                    let UpgradeItem::Del(address) = self.items.remove(0) else {
-                        unreachable!()
-                    };
+                        ctx.def(&ident, &resolved)
+                    }
+                    UpgradeStmt::Del(address) => ctx.del(&address),
+                };
 
-                    ctx.del(address);
+                if done {
+                    *self = mem::take(&mut **rest);
                 }
+
+                self.eval(ctx);
             }
+            Upgrade::Nil => {}
+        }
+    }
+
+    pub fn visit_stmts(&self, visitor: &mut impl FnMut(&UpgradeStmt)) {
+        match self {
+            Upgrade::Stmt(stmt, upgrade) => {
+                visitor(stmt);
+                upgrade.visit_stmts(visitor);
+            }
+            Upgrade::Nil => {}
         }
     }
 
     pub fn visit_reads(&self, visitor: &mut impl FnMut(&Ident, bool)) {
-        for item in &self.items {
-            match item {
-                UpgradeItem::Var(.., expr) => {
-                    expr.visit_reads(visitor);
+        match self {
+            Upgrade::Stmt(stmt, upgrade) => {
+                match stmt {
+                    UpgradeStmt::Var(.., expr) => {
+                        expr.visit_reads(visitor);
+                    }
+                    UpgradeStmt::Def(.., expr) => {
+                        expr.visit_reads(&mut |ident, _definite| visitor(ident, false));
+                    }
+                    UpgradeStmt::Del(..) => {}
                 }
-                UpgradeItem::Def(.., expr) => {
-                    expr.visit_reads(&mut |ident, _definite| visitor(ident, false));
-                }
-                UpgradeItem::Del(..) => {}
-                _ => (),
+
+                upgrade.visit_reads(visitor);
             }
+            Upgrade::Nil => (),
         }
     }
 }
@@ -93,22 +103,24 @@ impl Action {
         C: ActionEvalContext,
     {
         match self {
-            Action::Seq(a, b) => {
-                a.eval(ctx);
-                if let Action::Nil = &**a {
-                    b.eval(ctx);
+            Action::Stmt(stmt, _) => {
+                match stmt {
+                    ActionStmt::Write(ident, expr) => {
+                        expr.eval(ctx);
 
-                    *self = mem::replace(b, Action::Nil);
-                }
-            }
-            Action::Write(ident, expr) => {
-                expr.eval(ctx);
+                        if let Expr::Value(value) = expr {
+                            if ctx.write(ident, value) {
+                                let Action::Stmt(_, rest) = mem::take(self) else {
+                                    unreachable!()
+                                };
 
-                if let Expr::Value(value) = expr {
-                    if ctx.write(ident, value) {
-                        *self = Action::Nil;
+                                *self = *rest;
+                            }
+                        }
                     }
                 }
+
+                self.eval(ctx);
             }
             Action::Nil => {}
         }
@@ -117,12 +129,14 @@ impl Action {
     /// Traverses the expression, calling the callback with each VersionedAddress the Action might write to.
     pub fn visit_writes(&self, visitor: &mut impl FnMut(&ReactiveAddress, bool)) {
         match self {
-            Action::Seq(a, b) => {
-                a.visit_writes(visitor);
-                b.visit_writes(visitor);
-            }
-            Action::Write(ident, _) => {
-                visitor(ident, true);
+            Action::Stmt(stmt, rest) => {
+                match stmt {
+                    ActionStmt::Write(ident, _) => {
+                        visitor(ident, true);
+                    }
+                }
+
+                rest.visit_writes(visitor);
             }
             Action::Nil => {}
         }
@@ -131,12 +145,14 @@ impl Action {
     /// Traverses the action, calling the callback with each VersionedAddress the Action might read from.
     pub fn visit_reads(&self, visitor: &mut impl FnMut(&ReactiveAddress, bool)) {
         match self {
-            Action::Seq(a, b) => {
-                a.visit_reads(visitor);
-                b.visit_reads(visitor);
-            }
-            Action::Write(_, expr) => {
-                expr.visit_reads(visitor);
+            Action::Stmt(stmt, rest) => {
+                match stmt {
+                    ActionStmt::Write(_, expr) => {
+                        expr.visit_reads(visitor);
+                    }
+                }
+
+                rest.visit_reads(visitor);
             }
             Action::Nil => {}
         }

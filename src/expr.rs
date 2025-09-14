@@ -1,7 +1,4 @@
-use crate::{
-    actor::{Address, Version},
-    service::{ReactiveAddress, ReactiveId},
-};
+use crate::{actor::Address, service::ReactiveAddress};
 
 pub mod eval;
 
@@ -10,30 +7,32 @@ pub struct Name {
     pub text: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct Upgrade {
-    pub items: Vec<UpgradeItem>,
+#[derive(Debug, Clone, Default)]
+pub enum Upgrade {
+    Stmt(UpgradeStmt, Box<Upgrade>),
+    #[default]
+    Nil,
 }
 
 #[derive(Debug, Clone)]
-pub enum UpgradeItem {
+pub enum UpgradeStmt {
     Var(Ident, Expr<Ident>),
     Def(Ident, Expr<Ident>),
     Del(ReactiveAddress),
 }
 
-impl UpgradeItem {
+impl UpgradeStmt {
     pub fn address(&self) -> &Address {
         match self {
-            UpgradeItem::Var(ident, _) => match ident {
+            UpgradeStmt::Var(ident, _) => match ident {
                 Ident::New(address, _) => address,
                 Ident::Existing(address) => &address.service,
             },
-            UpgradeItem::Def(ident, _) => match ident {
+            UpgradeStmt::Def(ident, _) => match ident {
                 Ident::New(address, _) => address,
                 Ident::Existing(address) => &address.service,
             },
-            UpgradeItem::Del(address) => &address.service,
+            UpgradeStmt::Del(address) => &address.service,
         }
     }
 }
@@ -67,12 +66,17 @@ pub enum Expr<Ident = ReactiveAddress> {
     Value(Value),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum Action {
-    Seq(Box<Action>, Box<Action>),
-    Write(ReactiveAddress, Expr<ReactiveAddress>),
+    Stmt(ActionStmt, Box<Action>),
+    #[default]
     Nil,
+}
+
+#[derive(Debug, Clone)]
+pub enum ActionStmt {
     // TODO: control flow
+    Write(ReactiveAddress, Expr<ReactiveAddress>),
 }
 
 #[derive(Debug, Clone)]

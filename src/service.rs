@@ -8,6 +8,7 @@ use crate::{
     message::{BasisStamp, Iteration, LockKind, Message, StampedValue, TxId},
 };
 
+mod graph;
 mod held_locks;
 mod reactive;
 
@@ -46,6 +47,11 @@ impl ReactiveId {
 pub struct Import {
     pub roots: HashSet<ReactiveAddress>,
     pub importers: HashSet<ReactiveId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReactiveInputs {
+    pub inputs: HashSet<ReactiveAddress>,
 }
 
 #[derive(Debug, Clone)]
@@ -713,10 +719,20 @@ impl Actor for Service {
                         txid: txid.clone(),
                         service: ctx.me().clone(),
                         imports: self.imports.clone(),
+                        inputs: self
+                            .reactives
+                            .iter()
+                            .map(|(id, r)| {
+                                (
+                                    *id,
+                                    ReactiveInputs {
+                                        inputs: r.inputs().cloned().collect(),
+                                    },
+                                )
+                            })
+                            .collect(),
                         exports: self.exports.clone(),
                         next_id: self.next_id,
-                        subscriptions: self.subscriptions.clone(),
-                        roots: self.roots.clone(),
                     },
                 );
             }

@@ -7,7 +7,7 @@ use std::{
 use crate::{
     actor::{Address, Version},
     expr::{Action, Expr, Name, Type, Upgrade, Value},
-    service::{Export, Import, ReactiveAddress, ReactiveId},
+    service::{Export, Import, ReactiveAddress, ReactiveId, ReactiveInputs},
 };
 
 #[derive(Debug, Clone)]
@@ -59,10 +59,9 @@ pub enum Message {
         txid: TxId,
         service: Address,
         imports: HashMap<ReactiveAddress, Import>,
+        inputs: HashMap<ReactiveId, ReactiveInputs>,
         exports: HashMap<ReactiveId, Export>,
         next_id: ReactiveId,
-        subscriptions: HashMap<ReactiveId, HashSet<ReactiveId>>,
-        roots: HashMap<ReactiveId, HashSet<ReactiveAddress>>,
     },
     Configure {
         txid: TxId,

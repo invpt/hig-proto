@@ -11,6 +11,7 @@ use crate::{
 };
 
 mod actor;
+mod analysis;
 mod expr;
 mod manager;
 mod message;
